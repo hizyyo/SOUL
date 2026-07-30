@@ -19,7 +19,8 @@
     "jsx": "react-jsx",
     "outDir": "./dist",
     "paths": {
-      "@/*": ["./src/*"]
+      "@/*": ["./src/*"],
+      "soul-schema": ["./packages/soul-schema/src"]
     }
   },
   "include": ["src", "tests"],

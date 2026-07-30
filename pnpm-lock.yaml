@@ -20,6 +20,12 @@ importers:
       react-dom:
         specifier: ^19.2.8
         version: 19.2.8(react@19.2.8)
+      soul-schema:
+        specifier: workspace:*
+        version: link:packages/soul-schema
+      zod:
+        specifier: ^4.4.3
+        version: 4.4.3
     devDependencies:
       '@eslint/js':
         specifier: ^10.0.1
@@ -57,6 +63,12 @@ importers:
       vitest:
         specifier: ^4.1.10
         version: 4.1.10(vite@8.1.5)
+
+  packages/soul-schema:
+    dependencies:
+      zod:
+        specifier: ^4.4.3
+        version: 4.4.3
 
 packages:
 

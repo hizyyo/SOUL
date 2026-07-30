@@ -44,3 +44,10 @@
 - Tauri desktop не протестирован на macOS (только Windows).
 - Нет CI/CD — будет добавлен позже.
 - Иконки Tauri — заглушки, нужны настоящие.
+
+## Коммит
+
+```
+7896009 SESSION-00: repository bootstrap
+44c356c SESSION-00 cleanup: ignore generated platform icons and Tauri gen schemas
+```
