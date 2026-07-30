@@ -1,0 +1,49 @@
+# Secrets and keys
+.env
+.env.local
+.env.*.local
+*.key
+*.pem
+*.cert
+secrets/
+
+# Exports and local databases
+*.soul
+*.db
+*.db-journal
+*.db-wal
+*.db-shm
+soul.db
+
+# Build artifacts
+dist/
+build/
+target/
+*.tsbuildinfo
+
+# Dependencies
+node_modules/
+.pnpm-store/
+
+# IDE
+.vscode/settings.json
+.idea/
+*.swp
+*.swo
+*~
+
+# OS
+.DS_Store
+Thumbs.db
+desktop.ini
+
+# Tauri
+src-tauri/target/
+
+# Logs
+*.log
+npm-debug.log*
+pnpm-debug.log*
+
+# Session artifacts
+*.session
