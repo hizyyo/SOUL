@@ -6,7 +6,7 @@ import { Inbox } from './pages/Inbox';
 import { Tests } from './pages/Tests';
 import { ContextPage } from './pages/Context';
 import { Settings } from './pages/Settings';
-import { CALIBRATION_STEPS, type CalibrationAnswer } from './data/calibration';
+import { CALIBRATION_STEPS, TOTAL_STEPS, type CalibrationAnswer } from './data/calibration';
 import { buildEntityData } from './data/review';
 
 interface SoulInfo {
@@ -101,12 +101,21 @@ export function App() {
     try {
       const s = await invoke<SoulInfo>('init_app');
       setSoul(s);
-      const ents = await invoke<EntityInfo[]>('list_entities_cmd', { soulId: s.soul_id });
-      setEntities(ents);
+      let ents = await invoke<EntityInfo[]>('list_entities_cmd', { soulId: s.soul_id });
       const cal = await invoke<{ step: number; answers: string }>('get_calibration_cmd', {
         soulId: s.soul_id,
       });
-      setCalAnswers(parseCalibrationAnswers(cal.answers));
+      const answers = parseCalibrationAnswers(cal.answers);
+      setCalAnswers(answers);
+      if (cal.step >= TOTAL_STEPS && ents.length === 0 && answers.length > 0 && !s.activated) {
+        const created = await createEntitiesFromAnswers(s.soul_id, answers);
+        if (created.length > 0) {
+          ents = created;
+          const refreshed = await invoke<SoulInfo>('get_soul_cmd', { soulId: s.soul_id });
+          if (refreshed) setSoul(refreshed);
+        }
+      }
+      setEntities(ents);
       return s;
     } catch {
       setSoul(null);
@@ -124,6 +133,7 @@ export function App() {
     } else {
       setLoading(false);
     }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
   const refreshEntities = async (soulId: string) => {
@@ -166,12 +176,12 @@ export function App() {
     }
   };
 
-  const handleCalibrationComplete = async (answers: CalibrationAnswer[]) => {
-    if (!soul) return;
-    setShowCalibration(false);
-    setError(null);
-
+  const createEntitiesFromAnswers = async (
+    soulId: string,
+    answers: CalibrationAnswer[],
+  ): Promise<EntityInfo[]> => {
     const questions = CALIBRATION_STEPS.flatMap((s) => s.questions);
+    const created: EntityInfo[] = [];
     const errors: string[] = [];
     for (const answer of answers) {
       const question = questions.find((q) => q.id === answer.questionId);
@@ -179,27 +189,37 @@ export function App() {
       const data = buildEntityData(question, answer);
       if (!data) continue;
       try {
-        await invoke('add_entity_cmd', {
-          soulId: soul.soul_id,
+        const ent = await invoke<EntityInfo>('add_entity_cmd', {
+          soulId,
           entityType: question.category,
           status: 'candidate',
           data: JSON.stringify(data),
           deviceId,
         });
+        created.push(ent);
       } catch (e) {
         errors.push(`${question.id}: ${String(e)}`);
       }
     }
+    if (errors.length > 0) {
+      setError(`Some entities were not created: ${errors.join('; ')}`);
+    }
+    return created;
+  };
+
+  const handleCalibrationComplete = async (answers: CalibrationAnswer[]) => {
+    if (!soul) return;
+    setShowCalibration(false);
+    setError(null);
+
+    await createEntitiesFromAnswers(soul.soul_id, answers);
 
     try {
       const s = await invoke<SoulInfo>('get_soul_cmd', { soulId: soul.soul_id });
       if (s) setSoul(s);
       await refreshEntities(soul.soul_id);
     } catch (e) {
-      errors.push(String(e));
-    }
-    if (errors.length > 0) {
-      setError(`Some entities were not created: ${errors.join('; ')}`);
+      setError(String(e));
     }
     setTab('inbox');
   };
@@ -258,7 +278,10 @@ export function App() {
       if (!target) return;
       let data: Record<string, unknown> = {};
       try {
-        data = JSON.parse(target.data) as Record<string, unknown>;
+        const parsed: unknown = JSON.parse(target.data);
+        if (parsed && typeof parsed === 'object' && !Array.isArray(parsed)) {
+          data = parsed as Record<string, unknown>;
+        }
       } catch {
         data = {};
       }

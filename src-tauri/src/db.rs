@@ -354,6 +354,12 @@ pub fn update_entity(
         None => existing.data.clone(),
     };
 
+    if is_edit && data.is_none() {
+        return Err(
+            "Entity is already a candidate; provide new data to edit it.".to_string(),
+        );
+    }
+
     if data.is_some() && next_data == existing.data {
         return Err("Entity data is unchanged.".to_string());
     }
@@ -401,6 +407,7 @@ pub fn update_entity(
 }
 
 pub fn create_soul(conn: &Connection, display_name: &str, device_id: &str) -> SqlResult<SoulManifest> {
+    let tx = conn.unchecked_transaction()?;
     let soul_id = format!("soul_{}", Uuid::new_v4());
     let now = Utc::now().to_rfc3339();
 
@@ -409,13 +416,13 @@ pub fn create_soul(conn: &Connection, display_name: &str, device_id: &str) -> Sq
         "deviceId": device_id
     });
 
-    conn.execute(
+    tx.execute(
         "INSERT INTO souls (soul_id, display_name, created_at, device_id) VALUES (?1, ?2, ?3, ?4)",
         params![soul_id, display_name, now, device_id],
     )?;
 
     let head = append_event(
-        conn,
+        &tx,
         &NewEvent {
             soul_id: &soul_id,
             device_id,
@@ -426,6 +433,8 @@ pub fn create_soul(conn: &Connection, display_name: &str, device_id: &str) -> Sq
             payload: &genesis_payload,
         },
     )?;
+
+    tx.commit()?;
 
     Ok(SoulManifest {
         soul_id,
@@ -446,15 +455,20 @@ pub fn add_entity(
     status: &str,
     data: &str,
     device_id: &str,
-) -> SqlResult<EntityRow> {
+) -> Result<EntityRow, String> {
+    validate_status_value(status)?;
+    validate_entity_data_json(data)?;
+
+    let tx = conn.unchecked_transaction().map_err(|e| e.to_string())?;
     let id = format!("ent_{}", Uuid::new_v4());
     let now = Utc::now().to_rfc3339();
 
-    conn.execute(
+    tx.execute(
         "INSERT INTO entities (id, soul_id, entity_type, status, data, created_at, updated_at)
          VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
         params![id, soul_id, entity_type, status, data, now.clone(), now.clone()],
-    )?;
+    )
+    .map_err(|e| e.to_string())?;
 
     let operation = match status {
         "candidate" => "candidate.proposed",
@@ -464,7 +478,7 @@ pub fn add_entity(
 
     let payload = serde_json::json!({ "entityId": id, "data": data });
     let head = append_event(
-        conn,
+        &tx,
         &NewEvent {
             soul_id,
             device_id,
@@ -474,12 +488,16 @@ pub fn add_entity(
             entity_id: &id,
             payload: &payload,
         },
-    )?;
+    )
+    .map_err(|e| e.to_string())?;
 
-    conn.execute(
+    tx.execute(
         "UPDATE souls SET entity_count = entity_count + 1, head_event_hash = ?1 WHERE soul_id = ?2",
         params![head, soul_id],
-    )?;
+    )
+    .map_err(|e| e.to_string())?;
+
+    tx.commit().map_err(|e| e.to_string())?;
 
     Ok(EntityRow {
         id,
@@ -798,6 +816,35 @@ mod tests {
         let env = TestEnv::new();
         let err = update_entity(&env.conn, "ent_missing", "active", None, "device_t").unwrap_err();
         assert!(err.contains("not found"), "unexpected error: {err}");
+    }
+
+    #[test]
+    fn noop_candidate_edit_without_data_is_rejected() {
+        let env = TestEnv::new();
+        let (soul_id, ent_id) = seed(&env);
+
+        let err = update_entity(&env.conn, &ent_id, "candidate", None, "device_t").unwrap_err();
+        assert!(err.contains("already a candidate"), "unexpected error: {err}");
+        assert_eq!(get_entity(&env.conn, &ent_id).unwrap().unwrap().status, "candidate");
+        assert_eq!(operations(&env, &soul_id).len(), 2);
+    }
+
+    #[test]
+    fn add_entity_rejects_invalid_status_and_data() {
+        let env = TestEnv::new();
+        let soul = create_soul(&env.conn, "Тест", "device_t").unwrap();
+
+        let err = add_entity(&env.conn, &soul.soul_id, "preference", "disputed", r#"{}"#, "device_t")
+            .unwrap_err();
+        assert!(err.contains("Unknown entity status"), "unexpected error: {err}");
+
+        let err = add_entity(&env.conn, &soul.soul_id, "preference", "candidate", "not json", "device_t")
+            .unwrap_err();
+        assert!(err.contains("valid JSON"), "unexpected error: {err}");
+
+        let err = add_entity(&env.conn, &soul.soul_id, "preference", "candidate", r#"[1,2]"#, "device_t")
+            .unwrap_err();
+        assert!(err.contains("JSON object"), "unexpected error: {err}");
     }
 
     #[test]

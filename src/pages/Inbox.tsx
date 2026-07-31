@@ -103,13 +103,14 @@ export function Inbox({
           </span>
           <button
             onClick={() => onUndo(lastReview.entityId)}
+            disabled={busyId === lastReview.entityId}
             style={{
               marginLeft: 'auto',
               background: '#fff',
               border: '1px solid #93c5fd',
               borderRadius: '6px',
               padding: '4px 12px',
-              cursor: 'pointer',
+              cursor: busyId === lastReview.entityId ? 'default' : 'pointer',
               color: '#1d4ed8',
               fontWeight: 600,
             }}
@@ -200,12 +201,13 @@ export function Inbox({
               </span>
               <button
                 onClick={() => onUndo(e.id)}
+                disabled={busyId === e.id}
                 style={{
                   background: '#fff',
                   border: '1px solid #d1d5db',
                   borderRadius: '6px',
                   padding: '4px 10px',
-                  cursor: 'pointer',
+                  cursor: busyId === e.id ? 'default' : 'pointer',
                   fontSize: '12px',
                 }}
               >
@@ -331,14 +333,14 @@ export function Inbox({
                   onConfirm(confirmTarget.entity.id);
                   setConfirmTarget(null);
                 }}
-                disabled={!boundaryAck}
+                disabled={!boundaryAck || busyId === confirmTarget.entity.id}
                 style={{
                   padding: '6px 16px',
                   background: '#22c55e',
                   color: '#fff',
                   border: 'none',
                   borderRadius: '6px',
-                  cursor: 'pointer',
+                  cursor: busyId === confirmTarget.entity.id ? 'default' : 'pointer',
                   fontWeight: 600,
                   opacity: boundaryAck ? 1 : 0.5,
                 }}

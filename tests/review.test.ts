@@ -7,6 +7,7 @@ import {
   maskText,
   parseEntityData,
   rankCandidates,
+  type EntityData,
   type ReviewEntity,
 } from '../src/data/review';
 
@@ -181,6 +182,18 @@ describe('computeActivationScore', () => {
 
   it('handles missing metadata', () => {
     expect(Number.isFinite(computeActivationScore({}))).toBe(true);
+  });
+
+  it('stays finite with unknown sensitivity from legacy data', () => {
+    const legacy = { explicitness: 1, sensitivity: 'top-secret' } as unknown as Partial<EntityData>;
+    expect(Number.isFinite(computeActivationScore(legacy))).toBe(true);
+  });
+
+  it('clamps out-of-range explicitness', () => {
+    const scoreAt = (e: number) =>
+      computeActivationScore({ explicitness: e, sensitivity: 'internal' });
+    expect(scoreAt(99)).toBe(scoreAt(1));
+    expect(scoreAt(-5)).toBe(scoreAt(0));
   });
 });
 

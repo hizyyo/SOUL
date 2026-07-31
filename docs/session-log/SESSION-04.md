@@ -74,6 +74,7 @@
 
 - `b432eda` — `feat(soul): entity review control center [session-04]`
 - `fda5836` — `fix(soul): review fixes - atomic entity updates, error handling, cyrillic masking [session-04]`
+- `cb18fc5` — `fix(soul): full quality pass - validation everywhere, crash recovery, no-op guard, score NaN guard [session-04]`
 
 ## Повторная проверка и исправленные баги
 
@@ -87,3 +88,15 @@
 - **review.ts**: `maskLongNumbers` не маскировал 16-значные номера с разделителями (`4111 1111 1111 1111`). Теперь считается количество цифр в последовательности с разделителями.
 - Даты и ISO-датавремя не маскируются (проверено тестами, включая `2026-07-31T21:04:08Z`).
 - Повторный прогон: `cargo test` 27/27, `cargo clippy` чистый, `pnpm test` 41/41 (+4 новых), typecheck/lint/prettier PASS, `pnpm build` PASS.
+
+## Второй проход полной проверки (качество)
+
+- **db.rs**: `add_entity` теперь валидирует статус и JSON данных (fail-closed, как `update_entity`) — ранее принимал любые значения; добавлено 2 теста.
+- **db.rs**: `create_soul` и `add_entity` обёрнуты в транзакции — инвариант «сущность/событие/head_hash атомарны» теперь держится на всём слое БД, а не только в `update_entity`.
+- **db.rs**: no-op `candidate → candidate` без данных теперь отклоняется (`Entity is already a candidate; provide new data to edit it.`) — закрыт путь записи «пустого» события `entity.updated` (например, при двойном клике на Restore). +1 тест (цепочка событий не растёт).
+- **review.ts**: `computeActivationScore` — клампинг `explicitness` в [0,1] и fallback-штраф для неизвестной `sensitivity` из legacy-данных — исключён NaN-скоринг (ломавший сортировку ранжирования). +2 теста.
+- **App.tsx**: восстановление потерянных сущностей — если `calibration_step >= TOTAL_STEPS`, сущностей нет и сохранённые ответы есть (окно сбоя между сохранением калибровки и созданием сущностей), при загрузке сущности пересоздаются из сохранённых ответов. Общий helper `createEntitiesFromAnswers` для калибровки и восстановления.
+- **App.tsx**: редактирование legacy-сущности с массивом в `data` больше не теряет claim — парсинг только объектных данных.
+- **Inbox.tsx**: кнопки Undo (undo-бар), Restore и Confirm (модал) отключаются на время выполнения — исключены повторные вызовы и гонки.
+- **App.tsx**: погашено предупреждение `react-hooks/exhaustive-deps` (mount-once эффект, прагма).
+- Итоговый прогон: `cargo test` 29/29, `cargo clippy` чистый, `pnpm test` 43/43, typecheck/lint/prettier PASS, `pnpm build` PASS.

@@ -204,15 +204,16 @@ export function claimOf(entity: ReviewEntity): string {
 }
 
 export function computeActivationScore(data: Partial<EntityData>): number {
-  const explicitness = data.explicitness ?? 0.7;
+  const explicitness = Math.min(1, Math.max(0, data.explicitness ?? 0.7));
   const sensitivity: SensitivityLevel = data.sensitivity ?? 'internal';
+  const penalty = SENSITIVITY_PENALTY[sensitivity] ?? 0.1;
   return (
     0.3 * explicitness +
     0.2 * 1 + // source trust: explicit calibration
     0.15 * 0 + // repetition: none in calibration
     0.15 * 1 + // extraction confidence: deterministic
     0.1 * 0.5 - // future utility default
-    0.1 * SENSITIVITY_PENALTY[sensitivity] -
+    0.1 * penalty -
     0.2 * 0 // contradiction risk: none detected
   );
 }
