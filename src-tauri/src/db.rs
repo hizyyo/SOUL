@@ -94,6 +94,14 @@ pub fn init_db(app_dir: &std::path::Path) -> SqlResult<Connection> {
             FOREIGN KEY (soul_id) REFERENCES souls(soul_id)
         );
 
+        CREATE TABLE IF NOT EXISTS soul_state (
+            soul_id TEXT PRIMARY KEY,
+            activated INTEGER NOT NULL DEFAULT 0,
+            calibration_step INTEGER NOT NULL DEFAULT 0,
+            calibration_answers TEXT NOT NULL DEFAULT '[]',
+            FOREIGN KEY (soul_id) REFERENCES souls(soul_id)
+        );
+
         CREATE INDEX IF NOT EXISTS idx_events_soul ON events(soul_id);
         CREATE INDEX IF NOT EXISTS idx_entities_soul ON entities(soul_id);
         CREATE INDEX IF NOT EXISTS idx_entities_type ON entities(entity_type);",
@@ -106,6 +114,92 @@ fn compute_hash(data: &str) -> String {
     let mut hasher = Sha256::new();
     hasher.update(data.as_bytes());
     hex::encode(hasher.finalize())
+}
+
+pub fn get_calibration(conn: &Connection, soul_id: &str) -> SqlResult<(i32, String)> {
+    let mut stmt = conn.prepare(
+        "SELECT calibration_step, calibration_answers FROM soul_state WHERE soul_id = ?1",
+    )?;
+    let mut rows = stmt.query_map(params![soul_id], |row| {
+        Ok((row.get::<_, i32>(0)?, row.get::<_, String>(1)?))
+    })?;
+    match rows.next() {
+        Some(row) => Ok(row?),
+        None => Ok((0, "[]".to_string())),
+    }
+}
+
+pub fn save_calibration(
+    conn: &Connection,
+    soul_id: &str,
+    step: i32,
+    answers: &str,
+) -> SqlResult<()> {
+    conn.execute(
+        "INSERT INTO soul_state (soul_id, calibration_step, calibration_answers)
+         VALUES (?1, ?2, ?3)
+         ON CONFLICT(soul_id) DO UPDATE SET
+           calibration_step = excluded.calibration_step,
+           calibration_answers = excluded.calibration_answers",
+        params![soul_id, step, answers],
+    )?;
+    Ok(())
+}
+
+pub fn activate_soul(conn: &Connection, soul_id: &str) -> SqlResult<()> {
+    conn.execute(
+        "INSERT INTO soul_state (soul_id, activated)
+         VALUES (?1, 1)
+         ON CONFLICT(soul_id) DO UPDATE SET activated = 1",
+        params![soul_id],
+    )?;
+    Ok(())
+}
+
+pub fn is_soul_activated(conn: &Connection, soul_id: &str) -> SqlResult<bool> {
+    let mut stmt = conn.prepare(
+        "SELECT activated FROM soul_state WHERE soul_id = ?1",
+    )?;
+    let mut rows = stmt.query_map(params![soul_id], |row| {
+        Ok(row.get::<_, i32>(0)? != 0)
+    })?;
+    match rows.next() {
+        Some(row) => Ok(row?),
+        None => Ok(false),
+    }
+}
+
+pub fn update_entity(
+    conn: &Connection,
+    entity_id: &str,
+    status: &str,
+    data: &str,
+    _device_id: &str,
+) -> SqlResult<EntityRow> {
+    let now = Utc::now().to_rfc3339();
+
+    conn.execute(
+        "UPDATE entities SET status = ?1, data = ?2, updated_at = ?3 WHERE id = ?4",
+        params![status, data, now, entity_id],
+    )?;
+
+    let mut stmt = conn.prepare(
+        "SELECT id, soul_id, entity_type, status, data, created_at, updated_at
+         FROM entities WHERE id = ?1",
+    )?;
+    let row = stmt.query_row(params![entity_id], |row| {
+        Ok(EntityRow {
+            id: row.get(0)?,
+            soul_id: row.get(1)?,
+            entity_type: row.get(2)?,
+            status: row.get(3)?,
+            data: row.get(4)?,
+            created_at: row.get(5)?,
+            updated_at: row.get(6)?,
+        })
+    })?;
+
+    Ok(row)
 }
 
 pub fn create_soul(conn: &Connection, display_name: &str, device_id: &str) -> SqlResult<SoulManifest> {
