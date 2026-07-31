@@ -39,7 +39,7 @@ const SENSITIVITY_PENALTY: Record<SensitivityLevel, number> = {
   restricted: 1,
 };
 
-function domainForQuestion(questionId: string): string {
+export function domainForQuestion(questionId: string): string {
   if (questionId.startsWith('goal_')) return 'goals';
   if (questionId.startsWith('bound_')) return 'boundaries';
   if (questionId.startsWith('dec_')) return 'decisions';

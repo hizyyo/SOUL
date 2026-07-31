@@ -442,7 +442,7 @@ export function App() {
       ) : tab === 'tests' ? (
         <Tests />
       ) : tab === 'context' ? (
-        <ContextPage />
+        <ContextPage soul={soul} entities={entities} />
       ) : (
         <Settings
           soul={soul}

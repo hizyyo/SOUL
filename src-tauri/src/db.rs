@@ -121,7 +121,149 @@ pub fn init_db(app_dir: &std::path::Path) -> SqlResult<Connection> {
          ON entities(soul_id, dedup_key) WHERE dedup_key IS NOT NULL;",
     )?;
 
+    init_fts(&conn)?;
+
     Ok(conn)
+}
+
+/// Полнотекстовый индекс сущностей (SQLite FTS5, contentless).
+/// claim/evidence берутся из JSON-колонки data через json_extract; синхронизация
+/// поддерживается триггерами на все пути записи (add/update/import/wipe),
+/// поэтому FTS никогда не расходится с таблицей entities. Contentless-таблица
+/// выбрана потому, что внешний контент (content='entities') требует колонок
+/// с именами FTS-колонок, а данные лежат в JSON.
+fn init_fts(conn: &Connection) -> SqlResult<()> {
+    conn.execute_batch(
+        "CREATE VIRTUAL TABLE IF NOT EXISTS entity_fts USING fts5(
+            id UNINDEXED,
+            claim,
+            evidence,
+            entity_type UNINDEXED,
+            status UNINDEXED,
+            content='',
+            tokenize='unicode61 remove_diacritics 2'
+        );
+
+        CREATE TRIGGER IF NOT EXISTS entity_fts_ai AFTER INSERT ON entities BEGIN
+            INSERT INTO entity_fts(rowid, id, claim, evidence, entity_type, status)
+            VALUES (
+                new.rowid,
+                new.id,
+                coalesce(json_extract(new.data, '$.claim'), ''),
+                coalesce(json_extract(new.data, '$.evidence'), ''),
+                new.entity_type,
+                new.status
+            );
+        END;
+
+        CREATE TRIGGER IF NOT EXISTS entity_fts_ad AFTER DELETE ON entities BEGIN
+            INSERT INTO entity_fts(entity_fts, rowid, id, claim, evidence, entity_type, status)
+            VALUES (
+                'delete',
+                old.rowid,
+                old.id,
+                coalesce(json_extract(old.data, '$.claim'), ''),
+                coalesce(json_extract(old.data, '$.evidence'), ''),
+                old.entity_type,
+                old.status
+            );
+        END;
+
+        CREATE TRIGGER IF NOT EXISTS entity_fts_au
+        AFTER UPDATE OF data, entity_type, status ON entities BEGIN
+            INSERT INTO entity_fts(entity_fts, rowid, id, claim, evidence, entity_type, status)
+            VALUES (
+                'delete',
+                old.rowid,
+                old.id,
+                coalesce(json_extract(old.data, '$.claim'), ''),
+                coalesce(json_extract(old.data, '$.evidence'), ''),
+                old.entity_type,
+                old.status
+            );
+            INSERT INTO entity_fts(rowid, id, claim, evidence, entity_type, status)
+            VALUES (
+                new.rowid,
+                new.id,
+                coalesce(json_extract(new.data, '$.claim'), ''),
+                coalesce(json_extract(new.data, '$.evidence'), ''),
+                new.entity_type,
+                new.status
+            );
+        END;",
+    )?;
+
+    // Backfill только для пустого индекса (старые базы, созданные до появления
+    // FTS): contentless-таблица не поддерживает 'rebuild', заполняем вручную.
+    let indexed: i64 = conn.query_row("SELECT count(*) FROM entity_fts", [], |row| row.get(0))?;
+    if indexed == 0 {
+        conn.execute(
+            "INSERT INTO entity_fts(rowid, id, claim, evidence, entity_type, status)
+             SELECT rowid, id,
+                    coalesce(json_extract(data, '$.claim'), ''),
+                    coalesce(json_extract(data, '$.evidence'), ''),
+                    entity_type, status
+             FROM entities",
+            [],
+        )?;
+    }
+    Ok(())
+}
+
+/// Превращает произвольный пользовательский текст в безопасный FTS5 MATCH-запрос:
+/// непрерывные alphanumeric-последовательности (unicode) экранируются двойными
+/// кавычками и связываются через AND. Подчёркивания и дефисы — разделители,
+/// поэтому "topic_7" ищется как "topic" AND "7". Мусорные запросы (только
+/// спецсимволы, пустота) дают None — пустой результат, а не ошибку.
+pub fn fts_match_query(text: &str) -> Option<String> {
+    let terms: Vec<String> = text
+        .split(|c: char| !c.is_alphanumeric())
+        .filter(|w| !w.is_empty())
+        .map(|w| format!("\"{w}\""))
+        .collect();
+    if terms.is_empty() {
+        None
+    } else {
+        Some(terms.join(" AND "))
+    }
+}
+
+/// Полнотекстовый поиск сущностей по claim/evidence (FTS5 + bm25).
+/// Результаты ограничены душой (soul_id) — чужие сущности не утекают.
+pub fn search_entities(
+    conn: &Connection,
+    soul_id: &str,
+    query: &str,
+    limit: usize,
+) -> SqlResult<Vec<EntityRow>> {
+    let limit = limit.clamp(1, 100);
+    let Some(match_expr) = fts_match_query(query) else {
+        return Ok(Vec::new());
+    };
+    let mut stmt = conn.prepare(
+        "SELECT e.id, e.soul_id, e.entity_type, e.status, e.data, e.created_at, e.updated_at
+         FROM entity_fts
+         JOIN entities e ON e.rowid = entity_fts.rowid
+         WHERE entity_fts MATCH ?1 AND e.soul_id = ?2
+         ORDER BY bm25(entity_fts) ASC, e.updated_at DESC
+         LIMIT ?3",
+    )?;
+    let rows = stmt.query_map(params![match_expr, soul_id, limit as i64], |row| {
+        Ok(EntityRow {
+            id: row.get(0)?,
+            soul_id: row.get(1)?,
+            entity_type: row.get(2)?,
+            status: row.get(3)?,
+            data: row.get(4)?,
+            created_at: row.get(5)?,
+            updated_at: row.get(6)?,
+        })
+    })?;
+    let mut result = Vec::new();
+    for row in rows {
+        result.push(row?);
+    }
+    Ok(result)
 }
 
 /// Аддитивная миграция: добавляет колонку, только если её ещё нет.
@@ -1743,5 +1885,205 @@ mod tests {
 
         assert!(is_soul_activated(&env.conn, &soul.soul_id).unwrap());
         assert!(get_soul_state(&env.conn, &soul.soul_id).unwrap().2);
+    }
+
+    fn fts_data(question_id: &str, value: &str, claim: &str) -> String {
+        format!(
+            r#"{{"claim":"{claim}","evidence":"Q — {value}","source":"calibration","questionId":"{question_id}","value":"{value}","confidence":0.9,"sensitivity":"internal","scope":{{"domains":["preferences"],"projects":[],"people":[],"channels":[]}},"risk":false}}"#
+        )
+    }
+
+    fn seed_fts_entities(env: &TestEnv, soul_id: &str, status: &str) {
+        let items = [
+            ("pref_1", "Concise", "Prefer concise technical answers"),
+            ("pref_2", "Bullet points", "Prefer bullet points in lists"),
+            ("goal_1", "Build a product", "Primary goal is building a product"),
+        ];
+        for (qid, value, claim) in items {
+            add_entity(
+                &env.conn,
+                soul_id,
+                "preference",
+                status,
+                &fts_data(qid, value, claim),
+                "device_t",
+            )
+            .unwrap();
+        }
+    }
+
+    #[test]
+    fn fts5_is_enabled_in_bundled_sqlite() {
+        let env = TestEnv::new();
+        let options: String = env
+            .conn
+            .query_row("SELECT group_concat(compile_options, ' ') FROM pragma_compile_options", [], |r| r.get(0))
+            .unwrap();
+        assert!(options.contains("ENABLE_FTS5"), "FTS5 must be compiled in: {options}");
+    }
+
+    #[test]
+    fn fts_finds_entities_by_claim_and_evidence() {
+        let env = TestEnv::new();
+        let soul = create_soul(&env.conn, "Тест", "device_t").unwrap();
+        seed_fts_entities(&env, &soul.soul_id, "candidate");
+
+        let hits = search_entities(&env.conn, &soul.soul_id, "concise", 10).unwrap();
+        assert_eq!(hits.len(), 1);
+        assert!(hits[0].data.contains("Concise"));
+
+        let hits = search_entities(&env.conn, &soul.soul_id, "bullet", 10).unwrap();
+        assert_eq!(hits.len(), 1);
+        assert!(hits[0].data.contains("Bullet points"));
+    }
+
+    #[test]
+    fn fts_ranks_better_matches_first() {
+        let env = TestEnv::new();
+        let soul = create_soul(&env.conn, "Тест", "device_t").unwrap();
+        add_entity(
+            &env.conn,
+            &soul.soul_id,
+            "preference",
+            "candidate",
+            &fts_data("pref_1", "Concise", "Prefer concise concise technical answers"),
+            "device_t",
+        )
+        .unwrap();
+        add_entity(
+            &env.conn,
+            &soul.soul_id,
+            "preference",
+            "candidate",
+            &fts_data("pref_9", "Speed", "Concise code review style"),
+            "device_t",
+        )
+        .unwrap();
+
+        let hits = search_entities(&env.conn, &soul.soul_id, "concise", 10).unwrap();
+        assert_eq!(hits.len(), 2);
+        assert!(
+            hits[0].data.contains("Prefer concise concise"),
+            "entity with higher term frequency must rank first"
+        );
+
+        // AND-семантика: слово из одного клайма не должно тянуть чужой результат.
+        let hits = search_entities(&env.conn, &soul.soul_id, "concise technical", 10).unwrap();
+        assert_eq!(hits.len(), 1);
+        assert!(hits[0].data.contains("Prefer concise concise"));
+    }
+
+    #[test]
+    fn fts_never_leaks_entities_across_souls() {
+        let env = TestEnv::new();
+        let soul_a = create_soul(&env.conn, "А", "device_t").unwrap();
+        let soul_b = create_soul(&env.conn, "Б", "device_t").unwrap();
+        seed_fts_entities(&env, &soul_a.soul_id, "candidate");
+        seed_fts_entities(&env, &soul_b.soul_id, "candidate");
+
+        // "prefer" есть в двух сущностях каждой души: проверяем, что результат
+        // для soul_a не содержит ни одной чужой сущности.
+        let hits = search_entities(&env.conn, &soul_a.soul_id, "prefer", 10).unwrap();
+        assert_eq!(hits.len(), 2);
+        for hit in &hits {
+            assert_eq!(hit.soul_id, soul_a.soul_id, "foreign entity leaked");
+        }
+    }
+
+    #[test]
+    fn fts_stays_in_sync_with_updates_and_deletes() {
+        let env = TestEnv::new();
+        let soul = create_soul(&env.conn, "Тест", "device_t").unwrap();
+        let ent = add_entity(
+            &env.conn,
+            &soul.soul_id,
+            "preference",
+            "candidate",
+            &fts_data("pref_1", "Concise", "Prefer concise technical answers"),
+            "device_t",
+        )
+        .unwrap();
+
+        let new_data = r#"{"claim":"Prefer extremely verbose prose","evidence":"Q — Long","source":"calibration","questionId":"pref_1","value":"Long","confidence":0.9}"#;
+        update_entity(&env.conn, &ent.id, "candidate", Some(new_data), "device_t").unwrap();
+
+        assert!(search_entities(&env.conn, &soul.soul_id, "verbose", 10).unwrap().len() == 1);
+        assert!(search_entities(&env.conn, &soul.soul_id, "concise", 10).unwrap().is_empty());
+
+        env.conn
+            .execute("DELETE FROM entities WHERE id = ?1", params![ent.id])
+            .unwrap();
+        assert!(search_entities(&env.conn, &soul.soul_id, "verbose", 10).unwrap().is_empty());
+    }
+
+    #[test]
+    fn fts_syncs_on_raw_insert_like_import() {
+        let env = TestEnv::new();
+        let soul = create_soul(&env.conn, "Тест", "device_t").unwrap();
+        env.conn
+            .execute(
+                "INSERT INTO entities (id, soul_id, entity_type, status, data, created_at, updated_at)
+                 VALUES ('ent_imp', ?1, 'fact', 'active', '{\"claim\":\"Imported memory about signal processing\"}', '2026-07-01T00:00:00Z', '2026-07-01T00:00:00Z')",
+                params![soul.soul_id],
+            )
+            .unwrap();
+
+        let hits = search_entities(&env.conn, &soul.soul_id, "signal", 10).unwrap();
+        assert_eq!(hits.len(), 1);
+        assert_eq!(hits[0].id, "ent_imp");
+    }
+
+    #[test]
+    fn fts_handles_garbage_queries_without_error() {
+        let env = TestEnv::new();
+        let soul = create_soul(&env.conn, "Тест", "device_t").unwrap();
+        seed_fts_entities(&env, &soul.soul_id, "candidate");
+
+        for garbage in ["", "   ", "!!!", "\"\"", "()", "AND", "-", "***", "? query"] {
+            let hits = search_entities(&env.conn, &soul.soul_id, garbage, 10).unwrap();
+            assert_eq!(hits.len(), 0, "garbage query {garbage:?} must return nothing");
+        }
+    }
+
+    #[test]
+    fn fts_respects_limit() {
+        let env = TestEnv::new();
+        let soul = create_soul(&env.conn, "Тест", "device_t").unwrap();
+        seed_fts_entities(&env, &soul.soul_id, "candidate");
+
+        let hits = search_entities(&env.conn, &soul.soul_id, "prefer", 2).unwrap();
+        assert_eq!(hits.len(), 2);
+    }
+
+    #[test]
+    fn fts_search_over_thousand_entities_is_fast() {
+        let env = TestEnv::new();
+        let soul = create_soul(&env.conn, "Тест", "device_t").unwrap();
+        for i in 0..1000 {
+            add_entity(
+                &env.conn,
+                &soul.soul_id,
+                "fact",
+                "active",
+                &format!(
+                    r#"{{"claim":"Memory item number {i} about topic_{}","source":"calibration","questionId":"text_1","value":"v{i}","confidence":0.5}}"#,
+                    i % 20
+                ),
+                "device_t",
+            )
+            .unwrap();
+        }
+
+        let start = std::time::Instant::now();
+        for _ in 0..20 {
+            let hits = search_entities(&env.conn, &soul.soul_id, "topic_7", 10).unwrap();
+            assert!(!hits.is_empty());
+        }
+        let elapsed = start.elapsed();
+        assert!(
+            elapsed.as_millis() < 1000,
+            "20 searches over 1000 entities took {:?}",
+            elapsed
+        );
     }
 }

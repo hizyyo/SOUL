@@ -176,6 +176,18 @@ fn list_entities_cmd(
 }
 
 #[tauri::command]
+fn search_entities_cmd(
+    state: tauri::State<AppState>,
+    soul_id: String,
+    query: String,
+    limit: usize,
+) -> Result<Vec<EntityInfo>, String> {
+    let conn = state.conn.lock().map_err(|e| e.to_string())?;
+    let rows = db::search_entities(&conn, &soul_id, &query, limit).map_err(|e| e.to_string())?;
+    Ok(rows.iter().map(entity_to_info).collect())
+}
+
+#[tauri::command]
 fn get_calibration_cmd(
     state: tauri::State<AppState>,
     soul_id: String,
@@ -343,6 +355,7 @@ pub fn run() {
             add_entity_cmd,
             update_entity_cmd,
             list_entities_cmd,
+            search_entities_cmd,
             get_calibration_cmd,
             save_calibration_cmd,
             activate_soul_cmd,
