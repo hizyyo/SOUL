@@ -62,11 +62,16 @@ const KIND_EXPLICITNESS: Record<EntityKind, number> = {
 };
 
 function maskEmail(text: string): string {
-  return text.replace(/\b[\w.+-]+@[\w-]+\.[\w.-]+\b/g, '[email]');
+  return text.replace(
+    /(?<![\p{L}\w.+-@])[\p{L}\w.+-]+@[\p{L}\w-]+\.[\p{L}\w.-]+(?![-\w.@\p{L}])/giu,
+    '[email]',
+  );
 }
 
 function maskLongNumbers(text: string): string {
-  return text.replace(/\b\d{16,}\b/g, '[number]');
+  return text.replace(/\d[\d\s()-]*\d/g, (match) =>
+    match.replace(/\D/g, '').length >= 16 ? '[number]' : match,
+  );
 }
 
 function maskApiKeys(text: string): string {
@@ -117,7 +122,9 @@ export function detectSensitivity(text: string, entityType: string): Sensitivity
     /\b(sk|pk|rk)-[A-Za-z0-9_-]{8,}\b/i.test(text) ||
     /Bearer\s+[A-Za-z0-9._~+/=-]{10,}/i.test(text);
   if (secretish) return 'sensitive';
-  const personal = /\b[\w.+-]+@[\w-]+\.[\w.-]+\b/.test(text) || /\+\d[\d\s()-]{6,}\d\b/.test(text);
+  const personal =
+    /(?<![\p{L}\w.+-@])[\p{L}\w.+-]+@[\p{L}\w-]+\.[\p{L}\w.-]+(?![-\w.@\p{L}])/iu.test(text) ||
+    /\+\d[\d\s()-]{6,}\d\b/.test(text);
   if (personal) return 'private';
   if (entityType === 'boundary') return 'private';
   return 'internal';

@@ -47,18 +47,20 @@ export function Calibration({
 
   const currentStep = CALIBRATION_STEPS[stepIdx];
   if (!currentStep) {
-    onComplete(answers);
     return null;
   }
 
   const handleNext = async () => {
     setSaving(true);
-    await onSave(stepIdx + 1, answers);
-    setSaving(false);
-    if (stepIdx < TOTAL_STEPS - 1) {
-      setStepIdx(stepIdx + 1);
-    } else {
-      onComplete(answers);
+    try {
+      await onSave(stepIdx + 1, answers);
+      if (stepIdx < TOTAL_STEPS - 1) {
+        setStepIdx(stepIdx + 1);
+      } else {
+        onComplete(answers);
+      }
+    } finally {
+      setSaving(false);
     }
   };
 

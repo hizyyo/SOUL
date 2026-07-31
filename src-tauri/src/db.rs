@@ -318,9 +318,11 @@ pub fn update_entity(
     data: Option<&str>,
     device_id: &str,
 ) -> Result<EntityRow, String> {
+    let tx = conn.unchecked_transaction().map_err(|e| e.to_string())?;
+
     validate_status_value(status)?;
 
-    let existing = get_entity(conn, entity_id)
+    let existing = get_entity(&tx, entity_id)
         .map_err(|e| e.to_string())?
         .ok_or("Entity not found.".to_string())?;
 
@@ -357,7 +359,7 @@ pub fn update_entity(
     }
 
     let now = Utc::now().to_rfc3339();
-    conn.execute(
+    tx.execute(
         "UPDATE entities SET status = ?1, data = ?2, updated_at = ?3 WHERE id = ?4",
         params![status, next_data, now, entity_id],
     )
@@ -378,7 +380,7 @@ pub fn update_entity(
         "data": next_data
     });
     append_event(
-        conn,
+        &tx,
         &NewEvent {
             soul_id: &existing.soul_id,
             device_id,
@@ -390,6 +392,8 @@ pub fn update_entity(
         },
     )
     .map_err(|e| e.to_string())?;
+
+    tx.commit().map_err(|e| e.to_string())?;
 
     get_entity(conn, entity_id)
         .map_err(|e| e.to_string())?

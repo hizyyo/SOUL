@@ -95,6 +95,11 @@ describe('maskText', () => {
     expect(maskText('Contact me at ilya@example.com please.')).not.toContain('ilya@example.com');
   });
 
+  it('masks email with Cyrillic local part and domain', () => {
+    expect(maskText('Пишите на почта@яндекс.рф пожалуйста')).toContain('[email]');
+    expect(maskText('Пишите на почта@яндекс.рф пожалуйста')).not.toContain('почта@яндекс.рф');
+  });
+
   it('masks API keys and bearer tokens', () => {
     expect(maskText('key sk-abcDEF1234567890xyz')).toContain('[key]');
     expect(maskText('Authorization: Bearer abc.def.ghi1234567890')).toContain('[token]');
@@ -102,6 +107,19 @@ describe('maskText', () => {
 
   it('masks long numeric sequences', () => {
     expect(maskText('card 4111111111111111')).toContain('[number]');
+  });
+
+  it('masks 16-digit numbers with separators', () => {
+    expect(maskText('card 4111 1111 1111 1111')).toContain('[number]');
+    expect(maskText('card 4111-1111-1111-1111')).toContain('[number]');
+  });
+
+  it('does not mask short numeric groups', () => {
+    expect(maskText('pin 1234, code 123456')).toBe('pin 1234, code 123456');
+  });
+
+  it('does not mask ISO datetimes', () => {
+    expect(maskText('created 2026-07-31T21:04:08Z')).toContain('2026-07-31T21:04:08Z');
   });
 
   it('masks phone-like strings', () => {
@@ -136,6 +154,7 @@ describe('detectSensitivity', () => {
 
   it('flags personal contact details as private', () => {
     expect(detectSensitivity('Write to me at a@b.co', 'fact')).toBe('private');
+    expect(detectSensitivity('Пишите на почта@яндекс.рф', 'fact')).toBe('private');
   });
 
   it('keeps boundaries at least private', () => {

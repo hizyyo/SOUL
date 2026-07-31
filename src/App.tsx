@@ -155,35 +155,52 @@ export function App() {
   const handleSaveCalibration = async (step: number, answers: CalibrationAnswer[]) => {
     if (!soul) return;
     setCalAnswers(answers);
-    await invoke('save_calibration_cmd', {
-      soulId: soul.soul_id,
-      step,
-      answers: JSON.stringify(answers),
-    });
+    try {
+      await invoke('save_calibration_cmd', {
+        soulId: soul.soul_id,
+        step,
+        answers: JSON.stringify(answers),
+      });
+    } catch (e) {
+      setError(String(e));
+    }
   };
 
   const handleCalibrationComplete = async (answers: CalibrationAnswer[]) => {
     if (!soul) return;
     setShowCalibration(false);
+    setError(null);
 
     const questions = CALIBRATION_STEPS.flatMap((s) => s.questions);
+    const errors: string[] = [];
     for (const answer of answers) {
       const question = questions.find((q) => q.id === answer.questionId);
       if (!question) continue;
       const data = buildEntityData(question, answer);
       if (!data) continue;
-      await invoke('add_entity_cmd', {
-        soulId: soul.soul_id,
-        entityType: question.category,
-        status: 'candidate',
-        data: JSON.stringify(data),
-        deviceId,
-      });
+      try {
+        await invoke('add_entity_cmd', {
+          soulId: soul.soul_id,
+          entityType: question.category,
+          status: 'candidate',
+          data: JSON.stringify(data),
+          deviceId,
+        });
+      } catch (e) {
+        errors.push(`${question.id}: ${String(e)}`);
+      }
     }
 
-    const s = await invoke<SoulInfo>('get_soul_cmd', { soulId: soul.soul_id });
-    if (s) setSoul(s);
-    await refreshEntities(soul.soul_id);
+    try {
+      const s = await invoke<SoulInfo>('get_soul_cmd', { soulId: soul.soul_id });
+      if (s) setSoul(s);
+      await refreshEntities(soul.soul_id);
+    } catch (e) {
+      errors.push(String(e));
+    }
+    if (errors.length > 0) {
+      setError(`Some entities were not created: ${errors.join('; ')}`);
+    }
     setTab('inbox');
   };
 
@@ -197,7 +214,7 @@ export function App() {
     }
   };
 
-  const runStatusUpdate = async (id: string, status: string) => {
+  const runStatusUpdate = async (id: string, status: string): Promise<boolean> => {
     setBusyEntityId(id);
     setError(null);
     try {
@@ -207,26 +224,28 @@ export function App() {
         deviceId,
       });
       if (soul) await refreshEntities(soul.soul_id);
+      return true;
     } catch (e) {
       setError(String(e));
+      return false;
     } finally {
       setBusyEntityId(null);
     }
   };
 
   const handleConfirmEntity = async (id: string) => {
-    await runStatusUpdate(id, 'active');
-    setLastReview({ entityId: id, action: 'confirmed' });
+    const ok = await runStatusUpdate(id, 'active');
+    if (ok) setLastReview({ entityId: id, action: 'confirmed' });
   };
 
   const handleRejectEntity = async (id: string) => {
-    await runStatusUpdate(id, 'rejected');
-    setLastReview({ entityId: id, action: 'rejected' });
+    const ok = await runStatusUpdate(id, 'rejected');
+    if (ok) setLastReview({ entityId: id, action: 'rejected' });
   };
 
   const handleUndoEntity = async (id: string) => {
-    await runStatusUpdate(id, 'candidate');
-    setLastReview(null);
+    const ok = await runStatusUpdate(id, 'candidate');
+    if (ok) setLastReview(null);
   };
 
   const handleEditEntity = async (id: string, claim: string) => {

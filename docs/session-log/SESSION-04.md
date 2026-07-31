@@ -72,4 +72,18 @@
 
 ## Коммит
 
-- `33e3d62` — `feat(soul): entity review control center [session-04]`
+- `b432eda` — `feat(soul): entity review control center [session-04]`
+- `fda5836` — `fix(soul): review fixes - atomic entity updates, error handling, cyrillic masking [session-04]`
+
+## Повторная проверка и исправленные баги
+
+- **App.tsx**: undo-бар (`lastReview`) показывался даже при неудачном обновлении статуса — отменой «отменялось» несостоявшееся действие и записывался лишний `entity.updated`. `runStatusUpdate` теперь возвращает `boolean`, `lastReview` ставится только при успехе.
+- **App.tsx**: `handleCalibrationComplete` без try/catch — при сбое `add_entity_cmd` (например, claim > 2000) создание сущностей прерывалось, ошибка не показывалась (unhandled rejection), частичные сущности оставались. Теперь: ошибки собираются по каждой сущности, создание продолжается, показывается баннер, переход в Inbox гарантирован.
+- **App.tsx**: `handleSaveCalibration` — ошибки сохранения прогресса теперь попадают в баннер ошибок.
+- **Calibration.tsx**: сайд-эффект `onComplete(answers)` в теле render (`if (!currentStep)`) — при StrictMode создал бы сущности дважды. Убран (guard без побочного эффекта; завершение — только через `handleNext`).
+- **Calibration.tsx**: `setSaving(false)` не выполнялся при ошибке `onSave` — кнопка навсегда в состоянии «Saving...». Обёрнуто в `try/finally`.
+- **db.rs**: `update_entity` не был атомарным — UPDATE статуса и запись события выполнялись раздельно; при сбое записи события статус уже поменялся, но цепочка событий не обновилась (рассинхрон при экспорте/восстановлении). Обёрнуто в транзакцию (`unchecked_transaction` + `commit`).
+- **review.ts**: `maskEmail` не маскировал кириллические адреса (`почта@яндекс.рф`) — `\b` в V8 считает кириллицу не-word символом. Заменено на lookbehind/lookahead с `\p{L}`. Аналогично обновлён `detectSensitivity`.
+- **review.ts**: `maskLongNumbers` не маскировал 16-значные номера с разделителями (`4111 1111 1111 1111`). Теперь считается количество цифр в последовательности с разделителями.
+- Даты и ISO-датавремя не маскируются (проверено тестами, включая `2026-07-31T21:04:08Z`).
+- Повторный прогон: `cargo test` 27/27, `cargo clippy` чистый, `pnpm test` 41/41 (+4 новых), typecheck/lint/prettier PASS, `pnpm build` PASS.
