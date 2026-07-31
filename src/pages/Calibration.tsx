@@ -1,23 +1,37 @@
 import { useState, useCallback } from 'react';
-import { CALIBRATION_STEPS, TOTAL_STEPS, type CalibrationQuestion, type CalibrationAnswer } from '../data/calibration';
+import {
+  CALIBRATION_STEPS,
+  TOTAL_STEPS,
+  type CalibrationQuestion,
+  type CalibrationAnswer,
+} from '../data/calibration';
 
 interface CalibrationProps {
   soulId: string;
   initialStep: number;
   initialAnswers: CalibrationAnswer[];
   onSave: (step: number, answers: CalibrationAnswer[]) => void;
-  onComplete: () => void;
+  onComplete: (answers: CalibrationAnswer[]) => void;
   onBack: () => void;
 }
 
-export function Calibration({ initialStep, initialAnswers, onSave, onComplete, onBack }: CalibrationProps) {
+export function Calibration({
+  initialStep,
+  initialAnswers,
+  onSave,
+  onComplete,
+  onBack,
+}: CalibrationProps) {
   const [stepIdx, setStepIdx] = useState(initialStep);
   const [answers, setAnswers] = useState<CalibrationAnswer[]>(initialAnswers);
   const [saving, setSaving] = useState(false);
 
-  const getAnswer = useCallback((qid: string) => {
-    return answers.find((a) => a.questionId === qid);
-  }, [answers]);
+  const getAnswer = useCallback(
+    (qid: string) => {
+      return answers.find((a) => a.questionId === qid);
+    },
+    [answers],
+  );
 
   const setAnswer = useCallback((qid: string, value: string | string[]) => {
     setAnswers((prev) => {
@@ -33,7 +47,7 @@ export function Calibration({ initialStep, initialAnswers, onSave, onComplete, o
 
   const currentStep = CALIBRATION_STEPS[stepIdx];
   if (!currentStep) {
-    onComplete();
+    onComplete(answers);
     return null;
   }
 
@@ -44,7 +58,7 @@ export function Calibration({ initialStep, initialAnswers, onSave, onComplete, o
     if (stepIdx < TOTAL_STEPS - 1) {
       setStepIdx(stepIdx + 1);
     } else {
-      onComplete();
+      onComplete(answers);
     }
   };
 
@@ -72,17 +86,32 @@ export function Calibration({ initialStep, initialAnswers, onSave, onComplete, o
           Step {stepIdx + 1} of {TOTAL_STEPS} — {currentStep.title}
         </div>
         <div style={{ height: '4px', background: '#e5e7eb', borderRadius: '2px' }}>
-          <div style={{ height: '100%', width: `${((stepIdx + 1) / TOTAL_STEPS) * 100}%`, background: '#6366f1', borderRadius: '2px', transition: 'width 0.3s' }} />
+          <div
+            style={{
+              height: '100%',
+              width: `${((stepIdx + 1) / TOTAL_STEPS) * 100}%`,
+              background: '#6366f1',
+              borderRadius: '2px',
+              transition: 'width 0.3s',
+            }}
+          />
         </div>
       </div>
 
       <div style={{ display: 'flex', flexDirection: 'column', gap: '16px' }}>
         {currentStep.questions.map((q) => (
-          <QuestionRow key={q.id} question={q} answer={getAnswer(q.id)} onAnswer={(v) => setAnswer(q.id, v)} />
+          <QuestionRow
+            key={q.id}
+            question={q}
+            answer={getAnswer(q.id)}
+            onAnswer={(v) => setAnswer(q.id, v)}
+          />
         ))}
       </div>
 
-      <div style={{ marginTop: '20px', display: 'flex', gap: '8px', justifyContent: 'space-between' }}>
+      <div
+        style={{ marginTop: '20px', display: 'flex', gap: '8px', justifyContent: 'space-between' }}
+      >
         <button onClick={handleBack} style={secondaryBtnStyle}>
           {stepIdx === 0 ? 'Back' : 'Previous'}
         </button>
@@ -99,7 +128,9 @@ export function Calibration({ initialStep, initialAnswers, onSave, onComplete, o
 }
 
 function QuestionRow({
-  question, answer, onAnswer,
+  question,
+  answer,
+  onAnswer,
 }: {
   question: CalibrationQuestion;
   answer: CalibrationAnswer | undefined;
@@ -117,8 +148,12 @@ function QuestionRow({
               key={opt}
               onClick={() => onAnswer(opt)}
               style={{
-                padding: '6px 16px', borderRadius: '6px', border: val === opt ? '2px solid #6366f1' : '1px solid #d1d5db',
-                background: val === opt ? '#eef2ff' : '#fff', cursor: 'pointer', fontWeight: val === opt ? 600 : 400,
+                padding: '6px 16px',
+                borderRadius: '6px',
+                border: val === opt ? '2px solid #6366f1' : '1px solid #d1d5db',
+                background: val === opt ? '#eef2ff' : '#fff',
+                cursor: 'pointer',
+                fontWeight: val === opt ? 600 : 400,
               }}
             >
               {opt}
@@ -138,7 +173,10 @@ function QuestionRow({
           {question.options.map((opt) => {
             const isSel = selected.includes(opt);
             return (
-              <label key={opt} style={{ display: 'flex', alignItems: 'center', gap: '8px', cursor: 'pointer' }}>
+              <label
+                key={opt}
+                style={{ display: 'flex', alignItems: 'center', gap: '8px', cursor: 'pointer' }}
+              >
                 <input
                   type="radio"
                   name={question.id}
@@ -159,12 +197,21 @@ function QuestionRow({
       <div style={{ padding: '12px', border: '1px solid #e5e7eb', borderRadius: '8px' }}>
         <p style={{ margin: '0 0 8px', fontWeight: 500 }}>
           {question.prompt}
-          {question.optional && <span style={{ color: '#888', fontWeight: 400, fontSize: '12px' }}> (optional)</span>}
+          {question.optional && (
+            <span style={{ color: '#888', fontWeight: 400, fontSize: '12px' }}> (optional)</span>
+          )}
         </p>
         <textarea
           value={typeof val === 'string' ? val : ''}
           onChange={(e) => onAnswer(e.target.value)}
-          style={{ width: '100%', minHeight: '60px', padding: '8px', border: '1px solid #d1d5db', borderRadius: '6px', resize: 'vertical' }}
+          style={{
+            width: '100%',
+            minHeight: '60px',
+            padding: '8px',
+            border: '1px solid #d1d5db',
+            borderRadius: '6px',
+            resize: 'vertical',
+          }}
           placeholder="Type your answer..."
         />
       </div>
@@ -175,11 +222,20 @@ function QuestionRow({
 }
 
 const primaryBtnStyle: React.CSSProperties = {
-  padding: '8px 20px', background: '#6366f1', color: '#fff',
-  border: 'none', borderRadius: '6px', cursor: 'pointer', fontWeight: 600,
+  padding: '8px 20px',
+  background: '#6366f1',
+  color: '#fff',
+  border: 'none',
+  borderRadius: '6px',
+  cursor: 'pointer',
+  fontWeight: 600,
 };
 
 const secondaryBtnStyle: React.CSSProperties = {
-  padding: '8px 20px', background: '#f3f4f6', color: '#333',
-  border: '1px solid #d1d5db', borderRadius: '6px', cursor: 'pointer',
+  padding: '8px 20px',
+  background: '#f3f4f6',
+  color: '#333',
+  border: '1px solid #d1d5db',
+  borderRadius: '6px',
+  cursor: 'pointer',
 };

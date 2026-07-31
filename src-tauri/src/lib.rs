@@ -147,12 +147,17 @@ fn update_entity_cmd(
     state: tauri::State<AppState>,
     entity_id: String,
     status: String,
-    data: String,
+    data: Option<String>,
     device_id: String,
 ) -> Result<EntityInfo, String> {
     let conn = state.conn.lock().map_err(|e| e.to_string())?;
-    let row = update_entity(&conn, &entity_id, &status, &data, &device_id)
-        .map_err(|e| e.to_string())?;
+    let row = update_entity(
+        &conn,
+        &entity_id,
+        &status,
+        data.as_deref(),
+        &device_id,
+    )?;
     Ok(entity_to_info(&row))
 }
 

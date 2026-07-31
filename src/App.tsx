@@ -7,6 +7,7 @@ import { Tests } from './pages/Tests';
 import { ContextPage } from './pages/Context';
 import { Settings } from './pages/Settings';
 import { CALIBRATION_STEPS, type CalibrationAnswer } from './data/calibration';
+import { buildEntityData } from './data/review';
 
 interface SoulInfo {
   soul_id: string;
@@ -29,6 +30,11 @@ interface EntityInfo {
   data: string;
   created_at: string;
   updated_at: string;
+}
+
+interface LastReview {
+  entityId: string;
+  action: 'confirmed' | 'rejected';
 }
 
 declare global {
@@ -57,6 +63,25 @@ function getDeviceId(): string {
   return id;
 }
 
+function parseCalibrationAnswers(raw: string): CalibrationAnswer[] {
+  try {
+    const parsed: unknown = JSON.parse(raw);
+    if (Array.isArray(parsed)) {
+      return parsed.filter(
+        (a): a is CalibrationAnswer =>
+          a !== null &&
+          typeof a === 'object' &&
+          typeof (a as CalibrationAnswer).questionId === 'string' &&
+          (typeof (a as CalibrationAnswer).value === 'string' ||
+            Array.isArray((a as CalibrationAnswer).value)),
+      );
+    }
+  } catch {
+    // fall through to empty
+  }
+  return [];
+}
+
 export function App() {
   const [tab, setTab] = useState<Tab>('home');
   const [soul, setSoul] = useState<SoulInfo | null>(null);
@@ -67,6 +92,8 @@ export function App() {
   const [tauriAvailable, setTauriAvailable] = useState(false);
   const [showCalibration, setShowCalibration] = useState(false);
   const [calAnswers, setCalAnswers] = useState<CalibrationAnswer[]>([]);
+  const [busyEntityId, setBusyEntityId] = useState<string | null>(null);
+  const [lastReview, setLastReview] = useState<LastReview | null>(null);
 
   const deviceId = getDeviceId();
 
@@ -76,9 +103,16 @@ export function App() {
       setSoul(s);
       const ents = await invoke<EntityInfo[]>('list_entities_cmd', { soulId: s.soul_id });
       setEntities(ents);
+      const cal = await invoke<{ step: number; answers: string }>('get_calibration_cmd', {
+        soulId: s.soul_id,
+      });
+      setCalAnswers(parseCalibrationAnswers(cal.answers));
+      return s;
     } catch {
       setSoul(null);
       setEntities([]);
+      setCalAnswers([]);
+      return null;
     }
   };
 
@@ -91,6 +125,12 @@ export function App() {
       setLoading(false);
     }
   }, []);
+
+  const refreshEntities = async (soulId: string) => {
+    const ents = await invoke<EntityInfo[]>('list_entities_cmd', { soulId });
+    setEntities(ents);
+    return ents;
+  };
 
   const handleCreate = async () => {
     if (!displayName.trim()) return;
@@ -122,38 +162,28 @@ export function App() {
     });
   };
 
-  const handleCalibrationComplete = async () => {
+  const handleCalibrationComplete = async (answers: CalibrationAnswer[]) => {
     if (!soul) return;
     setShowCalibration(false);
 
-    for (const answer of calAnswers) {
-      const question = CALIBRATION_STEPS.flatMap((s) => s.questions)
-        .find((q) => q.id === answer.questionId);
+    const questions = CALIBRATION_STEPS.flatMap((s) => s.questions);
+    for (const answer of answers) {
+      const question = questions.find((q) => q.id === answer.questionId);
       if (!question) continue;
-
-      let payload: Record<string, unknown>;
-      const val = answer.value;
-      if (typeof val === 'string') {
-        payload = { claim: val, source: 'calibration' };
-      } else if (Array.isArray(val)) {
-        payload = { claim: question.prompt, value: val, source: 'calibration' };
-      } else {
-        continue;
-      }
-
+      const data = buildEntityData(question, answer);
+      if (!data) continue;
       await invoke('add_entity_cmd', {
         soulId: soul.soul_id,
         entityType: question.category,
         status: 'candidate',
-        data: JSON.stringify(payload),
+        data: JSON.stringify(data),
         deviceId,
       });
     }
 
     const s = await invoke<SoulInfo>('get_soul_cmd', { soulId: soul.soul_id });
     if (s) setSoul(s);
-    const ents = await invoke<EntityInfo[]>('list_entities_cmd', { soulId: soul.soul_id });
-    setEntities(ents);
+    await refreshEntities(soul.soul_id);
     setTab('inbox');
   };
 
@@ -167,33 +197,64 @@ export function App() {
     }
   };
 
-  const handleConfirmEntity = async (id: string) => {
+  const runStatusUpdate = async (id: string, status: string) => {
+    setBusyEntityId(id);
+    setError(null);
     try {
       await invoke('update_entity_cmd', {
         entityId: id,
-        status: 'active',
-        data: '{}',
+        status,
         deviceId,
       });
-      const ents = await invoke<EntityInfo[]>('list_entities_cmd', { soulId: soul?.soul_id });
-      setEntities(ents);
+      if (soul) await refreshEntities(soul.soul_id);
     } catch (e) {
       setError(String(e));
+    } finally {
+      setBusyEntityId(null);
     }
   };
 
+  const handleConfirmEntity = async (id: string) => {
+    await runStatusUpdate(id, 'active');
+    setLastReview({ entityId: id, action: 'confirmed' });
+  };
+
   const handleRejectEntity = async (id: string) => {
+    await runStatusUpdate(id, 'rejected');
+    setLastReview({ entityId: id, action: 'rejected' });
+  };
+
+  const handleUndoEntity = async (id: string) => {
+    await runStatusUpdate(id, 'candidate');
+    setLastReview(null);
+  };
+
+  const handleEditEntity = async (id: string, claim: string) => {
+    if (!soul) return;
+    setBusyEntityId(id);
+    setError(null);
     try {
+      const ents = await refreshEntities(soul.soul_id);
+      const target = ents.find((e) => e.id === id);
+      if (!target) return;
+      let data: Record<string, unknown> = {};
+      try {
+        data = JSON.parse(target.data) as Record<string, unknown>;
+      } catch {
+        data = {};
+      }
+      data.claim = claim.trim();
       await invoke('update_entity_cmd', {
         entityId: id,
-        status: 'rejected',
-        data: '{}',
+        status: 'candidate',
+        data: JSON.stringify(data),
         deviceId,
       });
-      const ents = await invoke<EntityInfo[]>('list_entities_cmd', { soulId: soul?.soul_id });
-      setEntities(ents);
+      await refreshEntities(soul.soul_id);
     } catch (e) {
       setError(String(e));
+    } finally {
+      setBusyEntityId(null);
     }
   };
 
@@ -210,13 +271,46 @@ export function App() {
   const candidateCount = entities.filter((e) => e.status === 'candidate').length;
 
   return (
-    <div style={{ padding: '16px 24px', fontFamily: 'system-ui, sans-serif', maxWidth: '720px', margin: '0 auto' }}>
-      <Nav active={tab} onTab={setTab} candidateCount={candidateCount} entityCount={entities.length} />
+    <div
+      style={{
+        padding: '16px 24px',
+        fontFamily: 'system-ui, sans-serif',
+        maxWidth: '720px',
+        margin: '0 auto',
+      }}
+    >
+      <Nav
+        active={tab}
+        onTab={setTab}
+        candidateCount={candidateCount}
+        entityCount={entities.length}
+      />
 
       {error && (
-        <div style={{ padding: '8px 12px', background: '#fef2f2', border: '1px solid #fecaca', borderRadius: '6px', marginBottom: '12px', color: '#dc2626', fontSize: '13px' }}>
+        <div
+          style={{
+            padding: '8px 12px',
+            background: '#fef2f2',
+            border: '1px solid #fecaca',
+            borderRadius: '6px',
+            marginBottom: '12px',
+            color: '#dc2626',
+            fontSize: '13px',
+          }}
+        >
           {error}
-          <button onClick={() => setError(null)} style={{ marginLeft: '8px', background: 'none', border: 'none', cursor: 'pointer', color: '#dc2626' }}>x</button>
+          <button
+            onClick={() => setError(null)}
+            style={{
+              marginLeft: '8px',
+              background: 'none',
+              border: 'none',
+              cursor: 'pointer',
+              color: '#dc2626',
+            }}
+          >
+            x
+          </button>
         </div>
       )}
 
@@ -242,9 +336,19 @@ export function App() {
           loading={loading}
           entityCount={entities.filter((e) => e.status === 'active').length}
           candidateCount={candidateCount}
+          onGoToInbox={() => setTab('inbox')}
         />
       ) : tab === 'inbox' ? (
-        <Inbox entities={entities} onConfirm={handleConfirmEntity} onReject={handleRejectEntity} />
+        <Inbox
+          entities={entities}
+          onConfirm={handleConfirmEntity}
+          onReject={handleRejectEntity}
+          onEdit={handleEditEntity}
+          onUndo={handleUndoEntity}
+          onDismissUndo={() => setLastReview(null)}
+          lastReview={lastReview}
+          busyId={busyEntityId}
+        />
       ) : tab === 'tests' ? (
         <Tests />
       ) : tab === 'context' ? (
