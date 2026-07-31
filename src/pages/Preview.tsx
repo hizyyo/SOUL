@@ -15,6 +15,7 @@ interface PreviewProps {
   busyId: string | null;
   onEdit: (id: string, claim: string) => void;
   onConfirmPreview: () => void;
+  onResetPreview: () => void;
   onActivate: (entityIds: string[]) => void;
   onBack: () => void;
 }
@@ -25,6 +26,7 @@ export function Preview({
   busyId,
   onEdit,
   onConfirmPreview,
+  onResetPreview,
   onActivate,
   onBack,
 }: PreviewProps) {
@@ -229,6 +231,13 @@ export function Preview({
               Activating {includedCount} item{includedCount !== 1 ? 's' : ''}. Everything excluded
               stays as a candidate in Inbox.
             </p>
+            <button
+              onClick={onResetPreview}
+              disabled={busyId !== null}
+              style={{ ...cancelBtnStyle, whiteSpace: 'nowrap' }}
+            >
+              Undo confirmation
+            </button>
             <button
               onClick={() => onActivate(candidates.filter((e) => isIncluded(e)).map((e) => e.id))}
               disabled={busyId !== null}

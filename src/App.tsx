@@ -237,6 +237,20 @@ export function App() {
     }
   };
 
+  const handleResetPreview = async () => {
+    if (!soul) return;
+    setError(null);
+    try {
+      const s = await invoke<SoulInfo>('reset_preview_cmd', {
+        soulId: soul.soul_id,
+        deviceId,
+      });
+      setSoul(s);
+    } catch (e) {
+      setError(String(e));
+    }
+  };
+
   const handleActivatePreview = async (entityIds: string[]) => {
     if (!soul) return;
     setError(null);
@@ -392,6 +406,7 @@ export function App() {
           busyId={busyEntityId}
           onEdit={handleEditEntity}
           onConfirmPreview={handleConfirmPreview}
+          onResetPreview={handleResetPreview}
           onActivate={handleActivatePreview}
           onBack={() => setTab('home')}
         />

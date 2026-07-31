@@ -263,6 +263,43 @@ pub fn confirm_soul_preview(
     Ok(())
 }
 
+/// Отмена подтверждения предпросмотра. Разрешена только до активации SOUL
+/// (fail-closed: активированный SOUL сбросить нельзя). Идемпотентно.
+pub fn reset_soul_preview(conn: &Connection, soul_id: &str, device_id: &str) -> Result<(), String> {
+    let (_, _, activated, preview_confirmed) =
+        get_soul_state(conn, soul_id).map_err(|e| e.to_string())?;
+    if activated {
+        return Err("Preview confirmation cannot be reset after activation.".to_string());
+    }
+    if !preview_confirmed {
+        return Ok(());
+    }
+
+    let tx = conn.unchecked_transaction().map_err(|e| e.to_string())?;
+    tx.execute(
+        "UPDATE soul_state SET preview_confirmed = 0 WHERE soul_id = ?1",
+        params![soul_id],
+    )
+    .map_err(|e| e.to_string())?;
+
+    append_event(
+        &tx,
+        &NewEvent {
+            soul_id,
+            device_id,
+            actor: "user",
+            operation: "soul.preview_revoked",
+            entity_type: "fact",
+            entity_id: soul_id,
+            payload: &serde_json::json!({ "soulId": soul_id }),
+        },
+    )
+    .map_err(|e| e.to_string())?;
+
+    tx.commit().map_err(|e| e.to_string())?;
+    Ok(())
+}
+
 /// Активация SOUL возможна только после явного подтверждения предпросмотра.
 /// Fail-closed: без preview_confirmed активация отклоняется.
 pub fn activate_soul(conn: &Connection, soul_id: &str, device_id: &str) -> Result<(), String> {
@@ -695,15 +732,21 @@ pub fn create_soul(conn: &Connection, display_name: &str, device_id: &str) -> Sq
 /// Детерминированный ключ дедупликации для ответов калибровки:
 /// хэш от (questionId + канонический value). Повторная компиляция одних и тех же
 /// ответов возвращает ту же сущность без дубликатов и без лишних событий.
+/// Для legacy-данных без questionId/value используется claim как основа ключа.
 fn dedup_key_for(data: &str) -> Option<String> {
     let value: serde_json::Value = serde_json::from_str(data).ok()?;
     let obj = value.as_object()?;
     if obj.get("source").and_then(|s| s.as_str()) != Some("calibration") {
         return None;
     }
-    let question_id = obj.get("questionId")?.as_str()?;
+    let question_id = obj.get("questionId").and_then(|q| q.as_str()).unwrap_or("");
     let base = match obj.get("value") {
-        Some(v) => serde_json::to_string(v).ok()?,
+        Some(v) => {
+            if question_id.is_empty() {
+                return None;
+            }
+            serde_json::to_string(v).ok()?
+        }
         None => {
             let claim = obj.get("claim").and_then(|c| c.as_str())?;
             serde_json::to_string(claim).ok()?
@@ -1257,6 +1300,47 @@ mod tests {
     }
 
     #[test]
+    fn add_entity_dedup_falls_back_to_claim_for_legacy_data() {
+        let env = TestEnv::new();
+        let soul = create_soul(&env.conn, "Тест", "device_t").unwrap();
+        let data = r#"{"claim":"Prefer concise answers","source":"calibration"}"#;
+
+        let first = add_entity(
+            &env.conn,
+            &soul.soul_id,
+            "preference",
+            "candidate",
+            data,
+            "device_t",
+        )
+        .unwrap();
+        let second = add_entity(
+            &env.conn,
+            &soul.soul_id,
+            "preference",
+            "candidate",
+            data,
+            "device_t",
+        )
+        .unwrap();
+
+        assert_eq!(first.id, second.id);
+        assert_eq!(list_entities(&env.conn, &soul.soul_id).unwrap().len(), 1);
+
+        let different = add_entity(
+            &env.conn,
+            &soul.soul_id,
+            "preference",
+            "candidate",
+            r#"{"claim":"Prefer verbose answers","source":"calibration"}"#,
+            "device_t",
+        )
+        .unwrap();
+        assert_ne!(first.id, different.id);
+        assert_eq!(list_entities(&env.conn, &soul.soul_id).unwrap().len(), 2);
+    }
+
+    #[test]
     fn add_entity_without_calibration_source_is_not_deduped() {
         let env = TestEnv::new();
         let soul = create_soul(&env.conn, "Тест", "device_t").unwrap();
@@ -1443,6 +1527,56 @@ mod tests {
             get_entity(&env.conn, &ids[0]).unwrap().unwrap().status,
             "candidate"
         );
+    }
+
+    #[test]
+    fn reset_preview_is_idempotent_and_writes_revoked_event_once() {
+        let env = TestEnv::new();
+        let (soul_id, _) = preview_seed(&env);
+        assert!(get_soul_state(&env.conn, &soul_id).unwrap().3);
+
+        reset_soul_preview(&env.conn, &soul_id, "device_t").unwrap();
+        assert!(!get_soul_state(&env.conn, &soul_id).unwrap().3);
+        reset_soul_preview(&env.conn, &soul_id, "device_t").unwrap();
+        assert!(!get_soul_state(&env.conn, &soul_id).unwrap().3);
+
+        let ops: Vec<String> = list_events(&env.conn, &soul_id)
+            .unwrap()
+            .into_iter()
+            .map(|e| e.operation)
+            .collect();
+        assert_eq!(
+            ops.iter().filter(|o| o.as_str() == "soul.preview_revoked").count(),
+            1
+        );
+        assert!(ops.contains(&"soul.preview_confirmed".to_string()));
+        assert!(!ops.contains(&"soul.activated".to_string()));
+    }
+
+    #[test]
+    fn reset_preview_blocks_activation_until_reconfirm() {
+        let env = TestEnv::new();
+        let (soul_id, ids) = preview_seed(&env);
+
+        reset_soul_preview(&env.conn, &soul_id, "device_t").unwrap();
+        let err = activate_preview(&env.conn, &soul_id, &ids, "device_t").unwrap_err();
+        assert!(err.contains("preview is confirmed"), "unexpected error: {err}");
+        assert!(!is_soul_activated(&env.conn, &soul_id).unwrap());
+
+        confirm_soul_preview(&env.conn, &soul_id, "device_t").unwrap();
+        activate_preview(&env.conn, &soul_id, &ids, "device_t").unwrap();
+        assert!(is_soul_activated(&env.conn, &soul_id).unwrap());
+    }
+
+    #[test]
+    fn reset_preview_after_activation_is_rejected() {
+        let env = TestEnv::new();
+        let (soul_id, ids) = preview_seed(&env);
+        activate_preview(&env.conn, &soul_id, &ids, "device_t").unwrap();
+
+        let err = reset_soul_preview(&env.conn, &soul_id, "device_t").unwrap_err();
+        assert!(err.contains("after activation"), "unexpected error: {err}");
+        assert!(get_soul_state(&env.conn, &soul_id).unwrap().3);
     }
 
     #[test]

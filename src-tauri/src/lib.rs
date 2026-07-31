@@ -5,7 +5,7 @@ mod package;
 use db::{
     init_db, create_soul, add_entity, list_entities, get_soul, list_souls,
     get_calibration, save_calibration, activate_soul, is_soul_activated,
-    update_entity, activate_preview, confirm_soul_preview,
+    update_entity, activate_preview, confirm_soul_preview, reset_soul_preview,
 };
 use package::{ExportReceipt, ImportPreview, DeletionReceipt, JsonExportReceipt, MarkdownExportReceipt};
 use serde::{Deserialize, Serialize};
@@ -208,6 +208,20 @@ fn confirm_preview_cmd(
 }
 
 #[tauri::command]
+fn reset_preview_cmd(
+    state: tauri::State<AppState>,
+    soul_id: String,
+    device_id: String,
+) -> Result<SoulInfo, String> {
+    let conn = state.conn.lock().map_err(|e| e.to_string())?;
+    reset_soul_preview(&conn, &soul_id, &device_id).map_err(|e| e.to_string())?;
+    let s = get_soul(&conn, &soul_id)
+        .map_err(|e| e.to_string())?
+        .ok_or("SOUL not found".to_string())?;
+    Ok(soul_to_info(&conn, &s))
+}
+
+#[tauri::command]
 fn activate_soul_cmd(
     state: tauri::State<AppState>,
     soul_id: String,
@@ -324,6 +338,7 @@ pub fn run() {
             save_calibration_cmd,
             activate_soul_cmd,
             confirm_preview_cmd,
+            reset_preview_cmd,
             activate_preview_cmd,
             export_soul_cmd,
             inspect_soul_file_cmd,

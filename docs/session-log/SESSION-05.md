@@ -80,11 +80,18 @@
 
 ## Известные ограничения
 
-- Двухшаговый поток: preview подтверждается кнопкой на странице, после подтверждения кнопка «Activate SOUL». Отмена после подтверждения preview невозможна через UI (флаг остаётся), но активация всё равно требует второго шага.
 - Выбор включённых пунктов в preview — локальное состояние страницы: при перезаходе сбрасывается к умолчанию (все нечувствительные включены). Исключённые пункты остаются кандидатами в Inbox и могут быть активированы там по одному.
-- Dedup действует только для данных с `source: "calibration"` и `questionId`; legacy-данные без questionId при повторном создании могут задвоиться (таких данных в текущем потоке нет).
 - Спорная комбинация детектируется только по правилу bound_2 «Nothing is off-limits» + bound_1 — это осознанный минимум без LLM-суждений.
 - Маскировка в preview — UI-уровень; в БД данные хранятся в открытом виде (запланировано на поздние сессии).
+
+## Повторная проверка и исправленные ограничения (fix-pass)
+
+По результатам отчёта исправлены два ограничения финальной версии:
+
+- **Отмена подтверждения preview**: добавлен `reset_soul_preview` (Rust, fail-closed: только до активации, идемпотентно, событие `soul.preview_revoked`), команда `reset_preview_cmd` и кнопка «Undo confirmation» на Preview. После отмены активация снова требует явного подтверждения (тесты: `reset_preview_is_idempotent_and_writes_revoked_event_once`, `reset_preview_blocks_activation_until_reconfirm`, `reset_preview_after_activation_is_rejected`).
+- **Legacy-dedup**: `dedup_key_for` теперь даёт fallback-ключ по claim, когда `questionId`/`value` отсутствуют (данные до SESSION-05) — повторное создание таких сущностей идемпотентно (тест `add_entity_dedup_falls_back_to_claim_for_legacy_data`).
+
+Проверки после фиксов: `cargo test` 50/50, `cargo clippy --all-targets` чисто, `pnpm test` 59/59, typecheck/lint/prettier/build — PASS.
 
 ## Последующие сессии
 
@@ -93,3 +100,4 @@
 ## Коммит
 
 - `4920182` — `feat(soul): deterministic calibration compile with safe preview activation [session-05]`
+- `80c9afa` — `fix(soul): preview confirmation reset and legacy dedup fallback [session-05]`
