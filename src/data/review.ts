@@ -20,6 +20,7 @@ export interface EntityData {
     channels: string[];
   };
   risk: boolean;
+  disputed?: boolean;
 }
 
 export interface ReviewEntity {
@@ -144,6 +145,7 @@ export function buildEntityData(
     if (!claim) return null;
     return {
       claim,
+      value: claim,
       evidence: question.prompt,
       source: 'calibration',
       questionId: question.id,
@@ -241,4 +243,14 @@ export function formatSourceDate(createdAt: string): string {
   const date = new Date(createdAt);
   if (Number.isNaN(date.getTime())) return createdAt;
   return date.toLocaleDateString(undefined, { year: 'numeric', month: 'short', day: 'numeric' });
+}
+
+/** Пункт нельзя активировать массовым подтверждением: граница, рискованное,
+ *  чувствительное или спорное утверждение — требует индивидуального подтверждения. */
+export function requiresExplicitConfirm(entity: ReviewEntity): boolean {
+  const data = parseEntityData(entity.data);
+  if (entity.entity_type === 'boundary' || data.risk === true) return true;
+  if (data.sensitivity === 'sensitive' || data.sensitivity === 'restricted') return true;
+  if (data.disputed === true) return true;
+  return false;
 }

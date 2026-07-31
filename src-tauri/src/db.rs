@@ -89,6 +89,7 @@ pub fn init_db(app_dir: &std::path::Path) -> SqlResult<Connection> {
             entity_type TEXT NOT NULL,
             status TEXT NOT NULL DEFAULT 'active',
             data TEXT NOT NULL DEFAULT '{}',
+            dedup_key TEXT,
             created_at TEXT NOT NULL,
             updated_at TEXT NOT NULL,
             FOREIGN KEY (soul_id) REFERENCES souls(soul_id)
@@ -99,6 +100,7 @@ pub fn init_db(app_dir: &std::path::Path) -> SqlResult<Connection> {
             activated INTEGER NOT NULL DEFAULT 0,
             calibration_step INTEGER NOT NULL DEFAULT 0,
             calibration_answers TEXT NOT NULL DEFAULT '[]',
+            preview_confirmed INTEGER NOT NULL DEFAULT 0,
             FOREIGN KEY (soul_id) REFERENCES souls(soul_id)
         );
 
@@ -107,7 +109,37 @@ pub fn init_db(app_dir: &std::path::Path) -> SqlResult<Connection> {
         CREATE INDEX IF NOT EXISTS idx_entities_type ON entities(entity_type);",
     )?;
 
+    add_column_if_missing(&conn, "entities", "dedup_key", "TEXT")?;
+    add_column_if_missing(
+        &conn,
+        "soul_state",
+        "preview_confirmed",
+        "INTEGER NOT NULL DEFAULT 0",
+    )?;
+    conn.execute_batch(
+        "CREATE UNIQUE INDEX IF NOT EXISTS idx_entities_dedup
+         ON entities(soul_id, dedup_key) WHERE dedup_key IS NOT NULL;",
+    )?;
+
     Ok(conn)
+}
+
+/// Аддитивная миграция: добавляет колонку, только если её ещё нет.
+/// Позволяет открывать базы, созданные предыдущими версиями приложения.
+fn add_column_if_missing(
+    conn: &Connection,
+    table: &str,
+    column: &str,
+    ddl: &str,
+) -> SqlResult<()> {
+    let sql = format!("ALTER TABLE {table} ADD COLUMN {column} {ddl}");
+    match conn.execute(&sql, []) {
+        Ok(_) => Ok(()),
+        Err(rusqlite::Error::SqliteFailure(_, Some(msg))) if msg.contains("duplicate column name") => {
+            Ok(())
+        }
+        Err(other) => Err(other),
+    }
 }
 
 pub fn compute_hash(data: &str) -> String {
@@ -130,16 +162,21 @@ pub fn count_soul(conn: &Connection, soul_id: &str) -> SqlResult<(i64, i64)> {
     Ok((entities, events))
 }
 
-pub fn get_soul_state(conn: &Connection, soul_id: &str) -> SqlResult<(i32, String, bool)> {
+pub fn get_soul_state(conn: &Connection, soul_id: &str) -> SqlResult<(i32, String, bool, bool)> {
     let mut stmt = conn.prepare(
-        "SELECT calibration_step, calibration_answers, activated FROM soul_state WHERE soul_id = ?1",
+        "SELECT calibration_step, calibration_answers, activated, preview_confirmed FROM soul_state WHERE soul_id = ?1",
     )?;
     let mut rows = stmt.query_map(params![soul_id], |row| {
-        Ok((row.get::<_, i32>(0)?, row.get::<_, String>(1)?, row.get::<_, i32>(2)? != 0))
+        Ok((
+            row.get::<_, i32>(0)?,
+            row.get::<_, String>(1)?,
+            row.get::<_, i32>(2)? != 0,
+            row.get::<_, i32>(3)? != 0,
+        ))
     })?;
     match rows.next() {
         Some(row) => Ok(row?),
-        None => Ok((0, "[]".to_string(), false)),
+        None => Ok((0, "[]".to_string(), false, false)),
     }
 }
 
@@ -187,14 +224,211 @@ pub fn save_calibration(
     Ok(())
 }
 
-pub fn activate_soul(conn: &Connection, soul_id: &str) -> SqlResult<()> {
+/// Явное подтверждение пользователем предпросмотра начального SOUL.
+/// Идемпотентно: повторный вызов не создаёт дублирующих событий.
+pub fn confirm_soul_preview(
+    conn: &Connection,
+    soul_id: &str,
+    device_id: &str,
+) -> Result<(), String> {
+    let (_, _, _, preview_confirmed) = get_soul_state(conn, soul_id).map_err(|e| e.to_string())?;
+    if preview_confirmed {
+        return Ok(());
+    }
+
+    let tx = conn.unchecked_transaction().map_err(|e| e.to_string())?;
+    tx.execute(
+        "INSERT INTO soul_state (soul_id, preview_confirmed)
+         VALUES (?1, 1)
+         ON CONFLICT(soul_id) DO UPDATE SET preview_confirmed = 1",
+        params![soul_id],
+    )
+    .map_err(|e| e.to_string())?;
+
+    append_event(
+        &tx,
+        &NewEvent {
+            soul_id,
+            device_id,
+            actor: "user",
+            operation: "soul.preview_confirmed",
+            entity_type: "fact",
+            entity_id: soul_id,
+            payload: &serde_json::json!({ "soulId": soul_id }),
+        },
+    )
+    .map_err(|e| e.to_string())?;
+
+    tx.commit().map_err(|e| e.to_string())?;
+    Ok(())
+}
+
+/// Активация SOUL возможна только после явного подтверждения предпросмотра.
+/// Fail-closed: без preview_confirmed активация отклоняется.
+pub fn activate_soul(conn: &Connection, soul_id: &str, device_id: &str) -> Result<(), String> {
+    let (_, _, _, preview_confirmed) = get_soul_state(conn, soul_id).map_err(|e| e.to_string())?;
+    if !preview_confirmed {
+        return Err("SOUL cannot be activated before the preview is confirmed.".to_string());
+    }
+
+    let tx = conn.unchecked_transaction().map_err(|e| e.to_string())?;
+    set_activated(&tx, soul_id, device_id)?;
+    tx.commit().map_err(|e| e.to_string())?;
+    Ok(())
+}
+
+fn set_activated(conn: &Connection, soul_id: &str, device_id: &str) -> Result<(), String> {
     conn.execute(
         "INSERT INTO soul_state (soul_id, activated)
          VALUES (?1, 1)
          ON CONFLICT(soul_id) DO UPDATE SET activated = 1",
         params![soul_id],
-    )?;
+    )
+    .map_err(|e| e.to_string())?;
+
+    append_event(
+        conn,
+        &NewEvent {
+            soul_id,
+            device_id,
+            actor: "user",
+            operation: "soul.activated",
+            entity_type: "fact",
+            entity_id: soul_id,
+            payload: &serde_json::json!({ "soulId": soul_id, "previewConfirmed": true }),
+        },
+    )
+    .map_err(|e| e.to_string())?;
     Ok(())
+}
+
+/// Массовая активация из предпросмотра: активирует только нечувствительные
+/// кандидаты из переданного списка. Требует предварительно подтверждённый
+/// предпросмотр (confirm_soul_preview). Границы, чувствительные и спорные
+/// пункты не могут быть активированы массовым подтверждением (fail-closed).
+pub fn activate_preview(
+    conn: &Connection,
+    soul_id: &str,
+    entity_ids: &[String],
+    device_id: &str,
+) -> Result<(), String> {
+    let tx = conn.unchecked_transaction().map_err(|e| e.to_string())?;
+
+    let (_, _, _, preview_confirmed) = get_soul_state(&tx, soul_id).map_err(|e| e.to_string())?;
+    if !preview_confirmed {
+        return Err("SOUL cannot be activated before the preview is confirmed.".to_string());
+    }
+    if is_soul_activated(&tx, soul_id).map_err(|e| e.to_string())? {
+        return Err("SOUL is already activated.".to_string());
+    }
+
+    for id in entity_ids {
+        let entity = get_entity(&tx, id)
+            .map_err(|e| e.to_string())?
+            .ok_or_else(|| format!("Entity {id} not found."))?;
+        if entity.soul_id != soul_id {
+            return Err(format!("Entity {id} does not belong to this SOUL."));
+        }
+        if entity.status == "active" {
+            continue;
+        }
+        if entity.status != "candidate" {
+            return Err(format!(
+                "Entity {id} cannot be activated by preview confirmation (status {}).",
+                entity.status
+            ));
+        }
+        if !eligible_for_bulk_activation(&entity) {
+            return Err(format!(
+                "Entity {id} is a boundary, sensitive or disputed item and cannot be activated by preview confirmation."
+            ));
+        }
+    }
+
+    let now = Utc::now().to_rfc3339();
+    for id in entity_ids {
+        let entity = get_entity(&tx, id)
+            .map_err(|e| e.to_string())?
+            .ok_or_else(|| format!("Entity {id} not found."))?;
+        if entity.status != "candidate" {
+            continue;
+        }
+        tx.execute(
+            "UPDATE entities SET status = 'active', updated_at = ?1 WHERE id = ?2",
+            params![now, id],
+        )
+        .map_err(|e| e.to_string())?;
+        let payload = serde_json::json!({ "entityId": id });
+        append_event(
+            &tx,
+            &NewEvent {
+                soul_id,
+                device_id,
+                actor: "user",
+                operation: "entity.activated",
+                entity_type: &entity.entity_type,
+                entity_id: id,
+                payload: &payload,
+            },
+        )
+        .map_err(|e| e.to_string())?;
+    }
+
+    tx.execute(
+        "INSERT INTO soul_state (soul_id, preview_confirmed, activated)
+         VALUES (?1, 1, 1)
+         ON CONFLICT(soul_id) DO UPDATE SET preview_confirmed = 1, activated = 1",
+        params![soul_id],
+    )
+    .map_err(|e| e.to_string())?;
+
+    let payload = serde_json::json!({
+        "soulId": soul_id,
+        "previewConfirmed": true,
+        "activatedEntityIds": entity_ids
+    });
+    append_event(
+        &tx,
+        &NewEvent {
+            soul_id,
+            device_id,
+            actor: "user",
+            operation: "soul.activated",
+            entity_type: "fact",
+            entity_id: soul_id,
+            payload: &payload,
+        },
+    )
+    .map_err(|e| e.to_string())?;
+
+    tx.commit().map_err(|e| e.to_string())?;
+    Ok(())
+}
+
+fn eligible_for_bulk_activation(entity: &EntityRow) -> bool {
+    if entity.entity_type == "boundary" {
+        return false;
+    }
+    let Ok(value) = serde_json::from_str::<serde_json::Value>(&entity.data) else {
+        return false;
+    };
+    let Some(obj) = value.as_object() else {
+        return false;
+    };
+    if obj.get("risk").and_then(|r| r.as_bool()) == Some(true) {
+        return false;
+    }
+    let sensitivity = obj
+        .get("sensitivity")
+        .and_then(|s| s.as_str())
+        .unwrap_or("internal");
+    if matches!(sensitivity, "sensitive" | "restricted") {
+        return false;
+    }
+    if obj.get("disputed").and_then(|d| d.as_bool()) == Some(true) {
+        return false;
+    }
+    true
 }
 
 pub fn is_soul_activated(conn: &Connection, soul_id: &str) -> SqlResult<bool> {
@@ -233,6 +467,16 @@ pub fn get_entity(conn: &Connection, entity_id: &str) -> SqlResult<Option<Entity
 }
 
 const MAX_CLAIM_CHARS: usize = 2000;
+
+const P0_ENTITY_TYPES: [&str; 5] = ["preference", "decision", "boundary", "goal", "fact"];
+
+fn validate_entity_type_value(entity_type: &str) -> Result<(), String> {
+    if P0_ENTITY_TYPES.contains(&entity_type) {
+        Ok(())
+    } else {
+        Err(format!("Unknown entity type: {entity_type}"))
+    }
+}
 
 fn validate_status_value(status: &str) -> Result<(), String> {
     if matches!(status, "candidate" | "active" | "rejected") {
@@ -448,6 +692,52 @@ pub fn create_soul(conn: &Connection, display_name: &str, device_id: &str) -> Sq
     })
 }
 
+/// Детерминированный ключ дедупликации для ответов калибровки:
+/// хэш от (questionId + канонический value). Повторная компиляция одних и тех же
+/// ответов возвращает ту же сущность без дубликатов и без лишних событий.
+fn dedup_key_for(data: &str) -> Option<String> {
+    let value: serde_json::Value = serde_json::from_str(data).ok()?;
+    let obj = value.as_object()?;
+    if obj.get("source").and_then(|s| s.as_str()) != Some("calibration") {
+        return None;
+    }
+    let question_id = obj.get("questionId")?.as_str()?;
+    let base = match obj.get("value") {
+        Some(v) => serde_json::to_string(v).ok()?,
+        None => {
+            let claim = obj.get("claim").and_then(|c| c.as_str())?;
+            serde_json::to_string(claim).ok()?
+        }
+    };
+    Some(compute_hash(&format!("{question_id}\x1f{base}")))
+}
+
+fn find_by_dedup_key(
+    conn: &Connection,
+    soul_id: &str,
+    dedup_key: &str,
+) -> SqlResult<Option<EntityRow>> {
+    let mut stmt = conn.prepare(
+        "SELECT id, soul_id, entity_type, status, data, created_at, updated_at
+         FROM entities WHERE soul_id = ?1 AND dedup_key = ?2",
+    )?;
+    let mut rows = stmt.query_map(params![soul_id, dedup_key], |row| {
+        Ok(EntityRow {
+            id: row.get(0)?,
+            soul_id: row.get(1)?,
+            entity_type: row.get(2)?,
+            status: row.get(3)?,
+            data: row.get(4)?,
+            created_at: row.get(5)?,
+            updated_at: row.get(6)?,
+        })
+    })?;
+    match rows.next() {
+        Some(row) => Ok(Some(row?)),
+        None => Ok(None),
+    }
+}
+
 pub fn add_entity(
     conn: &Connection,
     soul_id: &str,
@@ -456,17 +746,27 @@ pub fn add_entity(
     data: &str,
     device_id: &str,
 ) -> Result<EntityRow, String> {
+    validate_entity_type_value(entity_type)?;
     validate_status_value(status)?;
     validate_entity_data_json(data)?;
+
+    if let Some(dedup_key) = dedup_key_for(data) {
+        if let Some(existing) = find_by_dedup_key(conn, soul_id, &dedup_key)
+            .map_err(|e| e.to_string())?
+        {
+            return Ok(existing);
+        }
+    }
 
     let tx = conn.unchecked_transaction().map_err(|e| e.to_string())?;
     let id = format!("ent_{}", Uuid::new_v4());
     let now = Utc::now().to_rfc3339();
+    let dedup_key = dedup_key_for(data);
 
     tx.execute(
-        "INSERT INTO entities (id, soul_id, entity_type, status, data, created_at, updated_at)
-         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
-        params![id, soul_id, entity_type, status, data, now.clone(), now.clone()],
+        "INSERT INTO entities (id, soul_id, entity_type, status, data, dedup_key, created_at, updated_at)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
+        params![id, soul_id, entity_type, status, data, dedup_key, now.clone(), now.clone()],
     )
     .map_err(|e| e.to_string())?;
 
@@ -861,5 +1161,453 @@ mod tests {
             assert_eq!(ev.previous_event_hash, prev);
             prev = Some(ev.content_hash.clone());
         }
+    }
+
+    fn calibration_data(question_id: &str, value: &str) -> String {
+        format!(
+            r#"{{"claim":"Q — {value}","source":"calibration","questionId":"{question_id}","value":"{value}","confidence":0.9}}"#
+        )
+    }
+
+    #[test]
+    fn add_entity_rejects_non_p0_entity_types() {
+        let env = TestEnv::new();
+        let soul = create_soul(&env.conn, "Тест", "device_t").unwrap();
+
+        let err = add_entity(
+            &env.conn,
+            &soul.soul_id,
+            "personality",
+            "candidate",
+            r#"{"claim":"x"}"#,
+            "device_t",
+        )
+        .unwrap_err();
+        assert!(err.contains("Unknown entity type"), "unexpected error: {err}");
+        let err = add_entity(
+            &env.conn,
+            &soul.soul_id,
+            "relationship",
+            "candidate",
+            r#"{"claim":"x"}"#,
+            "device_t",
+        )
+        .unwrap_err();
+        assert!(err.contains("Unknown entity type"), "unexpected error: {err}");
+    }
+
+    #[test]
+    fn add_entity_is_idempotent_for_same_calibration_answer() {
+        let env = TestEnv::new();
+        let soul = create_soul(&env.conn, "Тест", "device_t").unwrap();
+        let data = calibration_data("pref_1", "Concise");
+
+        let first = add_entity(
+            &env.conn,
+            &soul.soul_id,
+            "preference",
+            "candidate",
+            &data,
+            "device_t",
+        )
+        .unwrap();
+        let second = add_entity(
+            &env.conn,
+            &soul.soul_id,
+            "preference",
+            "candidate",
+            &data,
+            "device_t",
+        )
+        .unwrap();
+
+        assert_eq!(first.id, second.id);
+        assert_eq!(list_entities(&env.conn, &soul.soul_id).unwrap().len(), 1);
+        assert_eq!(list_events(&env.conn, &soul.soul_id).unwrap().len(), 2);
+        let soul_after = get_soul(&env.conn, &soul.soul_id).unwrap().unwrap();
+        assert_eq!(soul_after.entity_count, 1);
+    }
+
+    #[test]
+    fn add_entity_dedup_distinguishes_answer_values() {
+        let env = TestEnv::new();
+        let soul = create_soul(&env.conn, "Тест", "device_t").unwrap();
+
+        let a = add_entity(
+            &env.conn,
+            &soul.soul_id,
+            "preference",
+            "candidate",
+            &calibration_data("pref_1", "Concise"),
+            "device_t",
+        )
+        .unwrap();
+        let b = add_entity(
+            &env.conn,
+            &soul.soul_id,
+            "preference",
+            "candidate",
+            &calibration_data("pref_1", "Detailed"),
+            "device_t",
+        )
+        .unwrap();
+
+        assert_ne!(a.id, b.id);
+        assert_eq!(list_entities(&env.conn, &soul.soul_id).unwrap().len(), 2);
+    }
+
+    #[test]
+    fn add_entity_without_calibration_source_is_not_deduped() {
+        let env = TestEnv::new();
+        let soul = create_soul(&env.conn, "Тест", "device_t").unwrap();
+        let data = r#"{"claim":"x","questionId":"pref_1","value":"Concise"}"#;
+
+        let first = add_entity(&env.conn, &soul.soul_id, "preference", "candidate", data, "device_t").unwrap();
+        let second = add_entity(&env.conn, &soul.soul_id, "preference", "candidate", data, "device_t").unwrap();
+
+        assert_ne!(first.id, second.id);
+        assert_eq!(list_entities(&env.conn, &soul.soul_id).unwrap().len(), 2);
+    }
+
+    #[test]
+    fn migration_adds_new_columns_to_old_schema_and_keeps_data() {
+        let dir = std::env::temp_dir().join(format!("soul-db-migrate-{}", Uuid::new_v4()));
+        std::fs::create_dir_all(&dir).unwrap();
+
+        let old = rusqlite::Connection::open(dir.join("soul.db")).unwrap();
+        old.execute_batch(
+            r#"CREATE TABLE souls (
+                soul_id TEXT PRIMARY KEY,
+                display_name TEXT NOT NULL,
+                format_version TEXT NOT NULL DEFAULT '0.1.0',
+                schema_version TEXT NOT NULL DEFAULT '0.1.0',
+                created_at TEXT NOT NULL,
+                head_event_hash TEXT,
+                entity_count INTEGER NOT NULL DEFAULT 0,
+                device_id TEXT NOT NULL
+            );
+            CREATE TABLE events (
+                event_id TEXT PRIMARY KEY,
+                soul_id TEXT NOT NULL,
+                device_id TEXT NOT NULL,
+                actor TEXT NOT NULL,
+                hlc TEXT NOT NULL,
+                operation TEXT NOT NULL,
+                entity_type TEXT NOT NULL,
+                entity_id TEXT NOT NULL,
+                payload TEXT NOT NULL DEFAULT '{}',
+                provenance_ids TEXT NOT NULL DEFAULT '[]',
+                previous_event_hash TEXT,
+                content_hash TEXT NOT NULL,
+                signature TEXT NOT NULL DEFAULT '',
+                created_at TEXT NOT NULL
+            );
+            CREATE TABLE entities (
+                id TEXT PRIMARY KEY,
+                soul_id TEXT NOT NULL,
+                entity_type TEXT NOT NULL,
+                status TEXT NOT NULL DEFAULT 'active',
+                data TEXT NOT NULL DEFAULT '{}',
+                created_at TEXT NOT NULL,
+                updated_at TEXT NOT NULL
+            );
+            CREATE TABLE soul_state (
+                soul_id TEXT PRIMARY KEY,
+                activated INTEGER NOT NULL DEFAULT 0,
+                calibration_step INTEGER NOT NULL DEFAULT 0,
+                calibration_answers TEXT NOT NULL DEFAULT '[]'
+            );
+            INSERT INTO souls (soul_id, display_name, created_at, device_id)
+                VALUES ('soul_old', 'Старый', '2026-07-01T00:00:00Z', 'device_old');
+            INSERT INTO entities (id, soul_id, entity_type, status, data, created_at, updated_at)
+                VALUES ('ent_old', 'soul_old', 'preference', 'active', '{"claim":"old"}', '2026-07-01T00:00:00Z', '2026-07-01T00:00:00Z');
+            INSERT INTO soul_state (soul_id, activated)
+                VALUES ('soul_old', 1);"#,
+        )
+        .unwrap();
+        drop(old);
+
+        let conn = init_db(&dir).unwrap();
+
+        let cols = conn
+            .prepare("PRAGMA table_info(entities)")
+            .unwrap()
+            .query_map([], |r| r.get::<_, String>(1))
+            .unwrap()
+            .collect::<Vec<_>>();
+        assert!(cols.iter().any(|c| c.as_deref() == Ok("dedup_key")));
+
+        let state_cols = conn
+            .prepare("PRAGMA table_info(soul_state)")
+            .unwrap()
+            .query_map([], |r| r.get::<_, String>(1))
+            .unwrap()
+            .collect::<Vec<_>>();
+        assert!(state_cols.iter().any(|c| c.as_deref() == Ok("preview_confirmed")));
+
+        let soul = get_soul(&conn, "soul_old").unwrap().unwrap();
+        assert_eq!(soul.display_name, "Старый");
+        assert_eq!(list_entities(&conn, "soul_old").unwrap().len(), 1);
+        assert!(is_soul_activated(&conn, "soul_old").unwrap());
+        assert!(!get_soul_state(&conn, "soul_old").unwrap().3);
+
+        init_db(&dir).unwrap();
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn confirm_preview_is_idempotent_and_appends_one_event() {
+        let env = TestEnv::new();
+        let soul = create_soul(&env.conn, "Тест", "device_t").unwrap();
+
+        confirm_soul_preview(&env.conn, &soul.soul_id, "device_t").unwrap();
+        confirm_soul_preview(&env.conn, &soul.soul_id, "device_t").unwrap();
+
+        let ops: Vec<String> = list_events(&env.conn, &soul.soul_id)
+            .unwrap()
+            .into_iter()
+            .map(|e| e.operation)
+            .collect();
+        assert_eq!(ops.iter().filter(|o| o.as_str() == "soul.preview_confirmed").count(), 1);
+        assert!(get_soul_state(&env.conn, &soul.soul_id).unwrap().3);
+    }
+
+    #[test]
+    fn activate_requires_preview_confirmation() {
+        let env = TestEnv::new();
+        let soul = create_soul(&env.conn, "Тест", "device_t").unwrap();
+
+        let err = activate_soul(&env.conn, &soul.soul_id, "device_t").unwrap_err();
+        assert!(err.contains("preview is confirmed"), "unexpected error: {err}");
+        assert!(!is_soul_activated(&env.conn, &soul.soul_id).unwrap());
+    }
+
+    #[test]
+    fn activate_after_preview_confirmation_appends_event() {
+        let env = TestEnv::new();
+        let soul = create_soul(&env.conn, "Тест", "device_t").unwrap();
+
+        confirm_soul_preview(&env.conn, &soul.soul_id, "device_t").unwrap();
+        activate_soul(&env.conn, &soul.soul_id, "device_t").unwrap();
+
+        assert!(is_soul_activated(&env.conn, &soul.soul_id).unwrap());
+        let ops: Vec<String> = list_events(&env.conn, &soul.soul_id)
+            .unwrap()
+            .into_iter()
+            .map(|e| e.operation)
+            .collect();
+        assert!(ops.contains(&"soul.activated".to_string()));
+    }
+
+    fn preview_seed(env: &TestEnv) -> (String, Vec<String>) {
+        let soul = create_soul(&env.conn, "Тест", "device_t").unwrap();
+        let mut ids = Vec::new();
+        for (question_id, value) in [("pref_1", "Concise"), ("goal_1", "Build a product")] {
+            let e = add_entity(
+                &env.conn,
+                &soul.soul_id,
+                if question_id.starts_with("pref_") { "preference" } else { "goal" },
+                "candidate",
+                &calibration_data(question_id, value),
+                "device_t",
+            )
+            .unwrap();
+            ids.push(e.id);
+        }
+        confirm_soul_preview(&env.conn, &soul.soul_id, "device_t").unwrap();
+        (soul.soul_id, ids)
+    }
+
+    #[test]
+    fn activate_preview_requires_preview_confirmation() {
+        let env = TestEnv::new();
+        let (soul_id, ids) = {
+            let soul = create_soul(&env.conn, "Тест", "device_t").unwrap();
+            let e = add_entity(
+                &env.conn,
+                &soul.soul_id,
+                "preference",
+                "candidate",
+                &calibration_data("pref_1", "Concise"),
+                "device_t",
+            )
+            .unwrap();
+            (soul.soul_id, vec![e.id])
+        };
+
+        let err = activate_preview(&env.conn, &soul_id, &ids, "device_t").unwrap_err();
+        assert!(err.contains("preview is confirmed"), "unexpected error: {err}");
+        assert!(!is_soul_activated(&env.conn, &soul_id).unwrap());
+        assert_eq!(
+            get_entity(&env.conn, &ids[0]).unwrap().unwrap().status,
+            "candidate"
+        );
+    }
+
+    #[test]
+    fn activate_preview_activates_eligible_candidates() {
+        let env = TestEnv::new();
+        let (soul_id, ids) = preview_seed(&env);
+
+        activate_preview(&env.conn, &soul_id, &ids, "device_t").unwrap();
+
+        assert!(is_soul_activated(&env.conn, &soul_id).unwrap());
+        assert!(get_soul_state(&env.conn, &soul_id).unwrap().2);
+        for id in &ids {
+            assert_eq!(get_entity(&env.conn, id).unwrap().unwrap().status, "active");
+        }
+        let ops: Vec<String> = list_events(&env.conn, &soul_id)
+            .unwrap()
+            .into_iter()
+            .map(|e| e.operation)
+            .collect();
+        assert_eq!(ops.iter().filter(|o| o.as_str() == "entity.activated").count(), 2);
+        assert!(ops.contains(&"soul.activated".to_string()));
+    }
+
+    #[test]
+    fn activate_preview_rejects_boundary_and_activates_nothing() {
+        let env = TestEnv::new();
+        let (soul_id, ids) = preview_seed(&env);
+        let boundary = add_entity(
+            &env.conn,
+            &soul_id,
+            "boundary",
+            "candidate",
+            r#"{"claim":"Never decide finances","source":"calibration","questionId":"bound_1","value":"Financial decisions"}"#,
+            "device_t",
+        )
+        .unwrap();
+
+        let mut with_boundary = ids.clone();
+        with_boundary.push(boundary.id.clone());
+        let err = activate_preview(&env.conn, &soul_id, &with_boundary, "device_t").unwrap_err();
+        assert!(err.contains("cannot be activated by preview confirmation"), "unexpected error: {err}");
+
+        assert!(!is_soul_activated(&env.conn, &soul_id).unwrap());
+        for id in &ids {
+            assert_eq!(get_entity(&env.conn, id).unwrap().unwrap().status, "candidate");
+        }
+    }
+
+    #[test]
+    fn activate_preview_rejects_sensitive_and_risk_flagged() {
+        let env = TestEnv::new();
+        let (soul_id, mut ids) = preview_seed(&env);
+
+        let sensitive = add_entity(
+            &env.conn,
+            &soul_id,
+            "fact",
+            "candidate",
+            r#"{"claim":"My password is x","source":"calibration","questionId":"text_1","value":"My password is x","sensitivity":"sensitive"}"#,
+            "device_t",
+        )
+        .unwrap();
+        let risk = add_entity(
+            &env.conn,
+            &soul_id,
+            "preference",
+            "candidate",
+            r#"{"claim":"risky","source":"calibration","questionId":"pref_9","value":"Speed","risk":true}"#,
+            "device_t",
+        )
+        .unwrap();
+
+        ids.push(sensitive.id.clone());
+        let err = activate_preview(&env.conn, &soul_id, &ids, "device_t").unwrap_err();
+        assert!(err.contains("cannot be activated by preview confirmation"), "unexpected error: {err}");
+
+        let mut with_risk = vec![risk.id.clone()];
+        with_risk.push(ids[0].clone());
+        let err = activate_preview(&env.conn, &soul_id, &with_risk, "device_t").unwrap_err();
+        assert!(err.contains("cannot be activated by preview confirmation"), "unexpected error: {err}");
+
+        assert!(!is_soul_activated(&env.conn, &soul_id).unwrap());
+    }
+
+    #[test]
+    fn activate_preview_rejects_foreign_or_missing_entity() {
+        let env = TestEnv::new();
+        let (soul_id, ids) = preview_seed(&env);
+        let other = create_soul(&env.conn, "Другой", "device_t").unwrap();
+        let foreign = add_entity(
+            &env.conn,
+            &other.soul_id,
+            "preference",
+            "candidate",
+            &calibration_data("pref_1", "Concise"),
+            "device_t",
+        )
+        .unwrap();
+
+        let mut with_foreign = ids.clone();
+        with_foreign.push(foreign.id.clone());
+        let err = activate_preview(&env.conn, &soul_id, &with_foreign, "device_t").unwrap_err();
+        assert!(err.contains("does not belong"), "unexpected error: {err}");
+
+        let err = activate_preview(&env.conn, &soul_id, &["ent_missing".to_string()], "device_t").unwrap_err();
+        assert!(err.contains("not found"), "unexpected error: {err}");
+
+        assert!(!is_soul_activated(&env.conn, &soul_id).unwrap());
+    }
+
+    #[test]
+    fn activate_preview_rejects_rejected_entity() {
+        let env = TestEnv::new();
+        let (soul_id, ids) = preview_seed(&env);
+        let rejected = add_entity(
+            &env.conn,
+            &soul_id,
+            "preference",
+            "candidate",
+            &calibration_data("pref_2", "Bullet points"),
+            "device_t",
+        )
+        .unwrap();
+        update_entity(&env.conn, &rejected.id, "rejected", None, "device_t").unwrap();
+
+        let mut with_rejected = ids.clone();
+        with_rejected.push(rejected.id);
+        let err = activate_preview(&env.conn, &soul_id, &with_rejected, "device_t").unwrap_err();
+        assert!(err.contains("cannot be activated by preview confirmation"), "unexpected error: {err}");
+        assert!(!is_soul_activated(&env.conn, &soul_id).unwrap());
+    }
+
+    #[test]
+    fn activate_preview_skips_already_active_entities() {
+        let env = TestEnv::new();
+        let (soul_id, ids) = preview_seed(&env);
+        update_entity(&env.conn, &ids[0], "active", None, "device_t").unwrap();
+
+        activate_preview(&env.conn, &soul_id, &ids, "device_t").unwrap();
+
+        assert!(is_soul_activated(&env.conn, &soul_id).unwrap());
+        assert_eq!(get_entity(&env.conn, &ids[0]).unwrap().unwrap().status, "active");
+        assert_eq!(get_entity(&env.conn, &ids[1]).unwrap().unwrap().status, "active");
+    }
+
+    #[test]
+    fn activate_preview_fails_when_soul_already_activated() {
+        let env = TestEnv::new();
+        let (soul_id, ids) = preview_seed(&env);
+        confirm_soul_preview(&env.conn, &soul_id, "device_t").unwrap();
+        activate_soul(&env.conn, &soul_id, "device_t").unwrap();
+
+        let err = activate_preview(&env.conn, &soul_id, &ids, "device_t").unwrap_err();
+        assert!(err.contains("already activated"), "unexpected error: {err}");
+    }
+
+    #[test]
+    fn activate_preview_with_empty_list_activates_soul() {
+        let env = TestEnv::new();
+        let soul = create_soul(&env.conn, "Тест", "device_t").unwrap();
+        confirm_soul_preview(&env.conn, &soul.soul_id, "device_t").unwrap();
+
+        activate_preview(&env.conn, &soul.soul_id, &[], "device_t").unwrap();
+
+        assert!(is_soul_activated(&env.conn, &soul.soul_id).unwrap());
+        assert!(get_soul_state(&env.conn, &soul.soul_id).unwrap().2);
     }
 }

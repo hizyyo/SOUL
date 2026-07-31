@@ -14,7 +14,7 @@ interface HomeProps {
   onCreate: () => void;
   onStartCalibration: () => void;
   onContinueCalibration: () => void;
-  onActivate: () => void;
+  onGoToPreview: () => void;
   displayName: string;
   onDisplayNameChange: (v: string) => void;
   error: string | null;
@@ -29,7 +29,7 @@ export function Home({
   onCreate,
   onStartCalibration,
   onContinueCalibration,
-  onActivate,
+  onGoToPreview,
   displayName,
   onDisplayNameChange,
   error,
@@ -117,11 +117,12 @@ export function Home({
     if (!soul.activated) {
       return (
         <div style={{ marginTop: '16px' }}>
-          <button onClick={onActivate} style={{ ...ctaBtnStyle, background: '#22c55e' }}>
-            Activate SOUL
+          <button onClick={onGoToPreview} style={{ ...ctaBtnStyle, background: '#22c55e' }}>
+            Review & Activate
           </button>
           <p style={{ fontSize: '13px', color: '#888', marginTop: '8px' }}>
-            Calibration is complete. Review your candidates in Inbox, then activate.
+            Calibration is complete. Review what SOUL learned, confirm the preview, then activate.
+            Sensitive items always need individual confirmation.
           </p>
         </div>
       );

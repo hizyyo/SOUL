@@ -7,6 +7,7 @@ import {
   maskText,
   parseEntityData,
   rankCandidates,
+  requiresExplicitConfirm,
   type EntityData,
   type ReviewEntity,
 } from '../src/data/review';
@@ -72,6 +73,7 @@ describe('buildEntityData', () => {
     expect(data!.kind).toBe('text');
     expect(data!.confidence).toBe(0.7);
     expect(data!.scope.domains).toEqual(['personal']);
+    expect(data!.value).toBe('I build desktop apps.');
   });
 
   it('marks boundaries as risk-bearing', () => {
@@ -260,5 +262,43 @@ describe('parseEntityData', () => {
   it('returns empty object for invalid data', () => {
     expect(parseEntityData('not json')).toEqual({});
     expect(parseEntityData('[]')).toEqual({});
+  });
+});
+
+describe('requiresExplicitConfirm', () => {
+  const entity = (over: Partial<ReviewEntity>): ReviewEntity => ({
+    id: 'ent_x',
+    entity_type: 'preference',
+    status: 'candidate',
+    data: '{}',
+    created_at: '2026-07-31T10:00:00Z',
+    ...over,
+  });
+
+  it('requires explicit confirm for boundaries', () => {
+    expect(requiresExplicitConfirm(entity({ entity_type: 'boundary' }))).toBe(true);
+  });
+
+  it('requires explicit confirm for risk-flagged items', () => {
+    expect(requiresExplicitConfirm(entity({ data: JSON.stringify({ risk: true }) }))).toBe(true);
+  });
+
+  it('requires explicit confirm for sensitive and restricted items', () => {
+    expect(
+      requiresExplicitConfirm(entity({ data: JSON.stringify({ sensitivity: 'sensitive' }) })),
+    ).toBe(true);
+    expect(
+      requiresExplicitConfirm(entity({ data: JSON.stringify({ sensitivity: 'restricted' }) })),
+    ).toBe(true);
+  });
+
+  it('requires explicit confirm for disputed items', () => {
+    expect(requiresExplicitConfirm(entity({ data: JSON.stringify({ disputed: true }) }))).toBe(
+      true,
+    );
+  });
+
+  it('does not require explicit confirm for plain preferences', () => {
+    expect(requiresExplicitConfirm(entity({}))).toBe(false);
   });
 });

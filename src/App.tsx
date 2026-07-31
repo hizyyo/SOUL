@@ -3,11 +3,12 @@ import { Nav, type Tab } from './components/Nav';
 import { Home } from './pages/Home';
 import { Calibration } from './pages/Calibration';
 import { Inbox } from './pages/Inbox';
+import { Preview } from './pages/Preview';
 import { Tests } from './pages/Tests';
 import { ContextPage } from './pages/Context';
 import { Settings } from './pages/Settings';
 import { CALIBRATION_STEPS, TOTAL_STEPS, type CalibrationAnswer } from './data/calibration';
-import { buildEntityData } from './data/review';
+import { compileAnswers } from './data/compile';
 
 interface SoulInfo {
   soul_id: string;
@@ -20,6 +21,7 @@ interface SoulInfo {
   created_at: string;
   head_event_hash: string | null;
   device_id: string;
+  preview_confirmed: boolean;
 }
 
 interface EntityInfo {
@@ -181,24 +183,21 @@ export function App() {
     answers: CalibrationAnswer[],
   ): Promise<EntityInfo[]> => {
     const questions = CALIBRATION_STEPS.flatMap((s) => s.questions);
+    const compiled = compileAnswers(answers, questions);
     const created: EntityInfo[] = [];
     const errors: string[] = [];
-    for (const answer of answers) {
-      const question = questions.find((q) => q.id === answer.questionId);
-      if (!question) continue;
-      const data = buildEntityData(question, answer);
-      if (!data) continue;
+    for (const item of compiled) {
       try {
         const ent = await invoke<EntityInfo>('add_entity_cmd', {
           soulId,
-          entityType: question.category,
+          entityType: item.type,
           status: 'candidate',
-          data: JSON.stringify(data),
+          data: JSON.stringify(item.data),
           deviceId,
         });
         created.push(ent);
       } catch (e) {
-        errors.push(`${question.id}: ${String(e)}`);
+        errors.push(`${item.questionId}: ${String(e)}`);
       }
     }
     if (errors.length > 0) {
@@ -221,14 +220,35 @@ export function App() {
     } catch (e) {
       setError(String(e));
     }
-    setTab('inbox');
+    setTab('preview');
   };
 
-  const handleActivate = async () => {
+  const handleConfirmPreview = async () => {
     if (!soul) return;
+    setError(null);
     try {
-      const s = await invoke<SoulInfo>('activate_soul_cmd', { soulId: soul.soul_id });
+      const s = await invoke<SoulInfo>('confirm_preview_cmd', {
+        soulId: soul.soul_id,
+        deviceId,
+      });
       setSoul(s);
+    } catch (e) {
+      setError(String(e));
+    }
+  };
+
+  const handleActivatePreview = async (entityIds: string[]) => {
+    if (!soul) return;
+    setError(null);
+    try {
+      const s = await invoke<SoulInfo>('activate_preview_cmd', {
+        soulId: soul.soul_id,
+        entityIds,
+        deviceId,
+      });
+      setSoul(s);
+      await refreshEntities(soul.soul_id);
+      setTab('home');
     } catch (e) {
       setError(String(e));
     }
@@ -365,13 +385,23 @@ export function App() {
           onComplete={handleCalibrationComplete}
           onBack={() => setShowCalibration(false)}
         />
+      ) : tab === 'preview' && soul && !soul.activated ? (
+        <Preview
+          entities={entities}
+          previewConfirmed={soul.preview_confirmed}
+          busyId={busyEntityId}
+          onEdit={handleEditEntity}
+          onConfirmPreview={handleConfirmPreview}
+          onActivate={handleActivatePreview}
+          onBack={() => setTab('home')}
+        />
       ) : tab === 'home' ? (
         <Home
           soul={soul}
           onCreate={handleCreate}
           onStartCalibration={handleStartCalibration}
           onContinueCalibration={() => setShowCalibration(true)}
-          onActivate={handleActivate}
+          onGoToPreview={() => setTab('preview')}
           displayName={displayName}
           onDisplayNameChange={setDisplayName}
           error={null}

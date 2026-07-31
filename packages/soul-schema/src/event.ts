@@ -3,6 +3,8 @@ import { SoulEntityType } from './entity';
 
 export const EventOperation = z.enum([
   'soul.created',
+  'soul.preview_confirmed',
+  'soul.activated',
   'candidate.proposed',
   'entity.activated',
   'entity.updated',

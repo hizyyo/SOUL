@@ -5,6 +5,7 @@ import {
   maskText,
   parseEntityData,
   rankCandidates,
+  requiresExplicitConfirm,
   type ReviewEntity,
 } from '../data/review';
 
@@ -46,13 +47,8 @@ export function Inbox({
   const [editingId, setEditingId] = useState<string | null>(null);
   const [draft, setDraft] = useState('');
 
-  const needsExplicitConfirm = (e: ReviewEntity) => {
-    const data = parseEntityData(e.data);
-    return e.entity_type === 'boundary' || data.risk === true || data.sensitivity === 'sensitive';
-  };
-
   const handleConfirmClick = (e: ReviewEntity) => {
-    if (needsExplicitConfirm(e)) {
+    if (requiresExplicitConfirm(e)) {
       setBoundaryAck(false);
       setConfirmTarget({ entity: e });
       return;

@@ -131,7 +131,7 @@ pub fn build_export_payload(
         .ok_or("SOUL not found.".to_string())?;
     let entities = db::list_entities(conn, soul_id).map_err(|e| e.to_string())?;
     let events = db::list_events(conn, soul_id).map_err(|e| e.to_string())?;
-    let (step, answers, activated) = db::get_soul_state(conn, soul_id).map_err(|e| e.to_string())?;
+    let (step, answers, activated, _) = db::get_soul_state(conn, soul_id).map_err(|e| e.to_string())?;
     Ok(SoulExportPayload {
         format: PAYLOAD_FORMAT.to_string(),
         version: PAYLOAD_VERSION.to_string(),
@@ -556,7 +556,7 @@ pub fn wipe_local_data(
 mod tests {
     use super::*;
     use crate::crypto;
-    use crate::db::{activate_soul, add_entity, create_soul, get_calibration, init_db, is_soul_activated, list_entities, list_events, list_souls, save_calibration};
+    use crate::db::{activate_soul, add_entity, confirm_soul_preview, create_soul, get_calibration, init_db, is_soul_activated, list_entities, list_events, list_souls, save_calibration};
     use rusqlite::Connection;
     use std::path::PathBuf;
 
@@ -591,7 +591,8 @@ mod tests {
             r#"{"claim":"Never share financial data"}"#, "device_t1").unwrap();
         save_calibration(&env.conn, &soul.soul_id, 2,
             r#"[{"questionId":"q1","value":"yes"}]"#).unwrap();
-        activate_soul(&env.conn, &soul.soul_id).unwrap();
+        confirm_soul_preview(&env.conn, &soul.soul_id, "device_t1").unwrap();
+        activate_soul(&env.conn, &soul.soul_id, "device_t1").unwrap();
         soul.soul_id
     }
 

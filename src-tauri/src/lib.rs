@@ -5,7 +5,7 @@ mod package;
 use db::{
     init_db, create_soul, add_entity, list_entities, get_soul, list_souls,
     get_calibration, save_calibration, activate_soul, is_soul_activated,
-    update_entity,
+    update_entity, activate_preview, confirm_soul_preview,
 };
 use package::{ExportReceipt, ImportPreview, DeletionReceipt, JsonExportReceipt, MarkdownExportReceipt};
 use serde::{Deserialize, Serialize};
@@ -28,6 +28,7 @@ pub struct SoulInfo {
     device_id: String,
     activated: bool,
     calibration_step: i32,
+    preview_confirmed: bool,
 }
 
 #[derive(Debug, Serialize, Deserialize, Clone)]
@@ -52,9 +53,8 @@ fn soul_to_info(
     s: &db::SoulManifest,
 ) -> SoulInfo {
     let activated = is_soul_activated(conn, &s.soul_id).unwrap_or(false);
-    let cstep = get_calibration(conn, &s.soul_id)
-        .map(|(s, _)| s)
-        .unwrap_or(0);
+    let (cstep, _, _, preview_confirmed) =
+        db::get_soul_state(conn, &s.soul_id).unwrap_or((0, "[]".to_string(), false, false));
     SoulInfo {
         soul_id: s.soul_id.clone(),
         display_name: s.display_name.clone(),
@@ -66,6 +66,7 @@ fn soul_to_info(
         device_id: s.device_id.clone(),
         activated,
         calibration_step: cstep,
+        preview_confirmed,
     }
 }
 
@@ -193,12 +194,42 @@ fn save_calibration_cmd(
 }
 
 #[tauri::command]
+fn confirm_preview_cmd(
+    state: tauri::State<AppState>,
+    soul_id: String,
+    device_id: String,
+) -> Result<SoulInfo, String> {
+    let conn = state.conn.lock().map_err(|e| e.to_string())?;
+    confirm_soul_preview(&conn, &soul_id, &device_id).map_err(|e| e.to_string())?;
+    let s = get_soul(&conn, &soul_id)
+        .map_err(|e| e.to_string())?
+        .ok_or("SOUL not found".to_string())?;
+    Ok(soul_to_info(&conn, &s))
+}
+
+#[tauri::command]
 fn activate_soul_cmd(
     state: tauri::State<AppState>,
     soul_id: String,
+    device_id: String,
 ) -> Result<SoulInfo, String> {
     let conn = state.conn.lock().map_err(|e| e.to_string())?;
-    activate_soul(&conn, &soul_id).map_err(|e| e.to_string())?;
+    activate_soul(&conn, &soul_id, &device_id).map_err(|e| e.to_string())?;
+    let s = get_soul(&conn, &soul_id)
+        .map_err(|e| e.to_string())?
+        .ok_or("SOUL not found".to_string())?;
+    Ok(soul_to_info(&conn, &s))
+}
+
+#[tauri::command]
+fn activate_preview_cmd(
+    state: tauri::State<AppState>,
+    soul_id: String,
+    entity_ids: Vec<String>,
+    device_id: String,
+) -> Result<SoulInfo, String> {
+    let conn = state.conn.lock().map_err(|e| e.to_string())?;
+    activate_preview(&conn, &soul_id, &entity_ids, &device_id).map_err(|e| e.to_string())?;
     let s = get_soul(&conn, &soul_id)
         .map_err(|e| e.to_string())?
         .ok_or("SOUL not found".to_string())?;
@@ -292,6 +323,8 @@ pub fn run() {
             get_calibration_cmd,
             save_calibration_cmd,
             activate_soul_cmd,
+            confirm_preview_cmd,
+            activate_preview_cmd,
             export_soul_cmd,
             inspect_soul_file_cmd,
             import_soul_file_cmd,
