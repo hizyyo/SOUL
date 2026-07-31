@@ -1,4 +1,4 @@
-import { useState } from 'react';
+import { useEffect, useState } from 'react';
 import {
   claimOf,
   formatSourceDate,
@@ -72,6 +72,15 @@ export function Inbox({
     onEdit(id, trimmed);
     setEditingId(null);
   };
+
+  useEffect(() => {
+    if (!confirmTarget) return;
+    const onKey = (ev: KeyboardEvent) => {
+      if (ev.key === 'Escape') setConfirmTarget(null);
+    };
+    window.addEventListener('keydown', onKey);
+    return () => window.removeEventListener('keydown', onKey);
+  }, [confirmTarget]);
 
   return (
     <div>
@@ -307,6 +316,7 @@ export function Inbox({
                 type="checkbox"
                 checked={boundaryAck}
                 onChange={(ev) => setBoundaryAck(ev.target.checked)}
+                autoFocus
                 style={{ marginTop: '2px' }}
               />
               <span>I understand this will apply to AI actions.</span>

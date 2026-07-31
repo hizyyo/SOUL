@@ -1,4 +1,4 @@
-import { useState } from 'react';
+import { useEffect, useState } from 'react';
 import { open, save } from '@tauri-apps/plugin-dialog';
 
 interface SoulInfo {
@@ -62,6 +62,14 @@ interface DeletionReceipt {
   keys_deleted: boolean;
 }
 
+interface ReceiptSummary {
+  file: string;
+  deleted_at: string;
+  entity_count: number;
+  event_count: number;
+  keys_deleted: boolean;
+}
+
 type ModalState =
   | { kind: 'none' }
   | { kind: 'export-passphrase' }
@@ -105,6 +113,19 @@ export function Settings({ soul, entities, onDataChanged, onGoHome }: SettingsPr
   const [busy, setBusy] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [success, setSuccess] = useState<string | null>(null);
+  const [receipts, setReceipts] = useState<ReceiptSummary[]>([]);
+
+  const loadReceipts = async () => {
+    try {
+      setReceipts(await invoke<ReceiptSummary[]>('list_receipts_cmd'));
+    } catch {
+      setReceipts([]);
+    }
+  };
+
+  useEffect(() => {
+    loadReceipts();
+  }, []);
 
   const closeModal = () => setModal({ kind: 'none' });
 
@@ -200,7 +221,10 @@ export function Settings({ soul, entities, onDataChanged, onGoHome }: SettingsPr
     setBusy('Verifying backup...');
     setError(null);
     try {
-      const preview = await invoke<ImportPreview>('inspect_soul_file_cmd', { path: filePath, password });
+      const preview = await invoke<ImportPreview>('inspect_soul_file_cmd', {
+        path: filePath,
+        password,
+      });
       setModal({ kind: 'restore-preview', filePath, password, preview });
     } catch (e) {
       setError(String(e));
@@ -253,18 +277,29 @@ export function Settings({ soul, entities, onDataChanged, onGoHome }: SettingsPr
           style={{
             ...errorStyle,
             ...(modal.kind !== 'none'
-              ? { position: 'fixed', top: '16px', left: '50%', transform: 'translateX(-50%)', zIndex: 200, maxWidth: 'min(560px, 90vw)' }
+              ? {
+                  position: 'fixed',
+                  top: '16px',
+                  left: '50%',
+                  transform: 'translateX(-50%)',
+                  zIndex: 200,
+                  maxWidth: 'min(560px, 90vw)',
+                }
               : {}),
           }}
         >
           {error}
-          <button onClick={() => setError(null)} style={dismissBtnStyle}>x</button>
+          <button onClick={() => setError(null)} style={dismissBtnStyle}>
+            x
+          </button>
         </div>
       )}
       {success && (
         <div style={successStyle}>
           {success}
-          <button onClick={() => setSuccess(null)} style={dismissBtnStyle}>x</button>
+          <button onClick={() => setSuccess(null)} style={dismissBtnStyle}>
+            x
+          </button>
         </div>
       )}
 
@@ -274,14 +309,29 @@ export function Settings({ soul, entities, onDataChanged, onGoHome }: SettingsPr
         <StatusRow label="Device ID" value={soul ? soul.device_id : '—'} mono />
         <StatusRow label="Schema version" value={soul ? soul.schema_version : '—'} />
         <StatusRow label="Format version" value={soul ? soul.format_version : '—'} />
-        <StatusRow label="Created" value={soul ? new Date(soul.created_at).toLocaleString() : '—'} />
-        <StatusRow label="Head event hash" value={soul?.head_event_hash ? shortHash(soul.head_event_hash) : '—'} mono />
-        <StatusRow label="Entities" value={soul ? `${activeCount} active, ${candidateCount} candidate, ${rejectedCount} rejected` : '—'} />
+        <StatusRow
+          label="Created"
+          value={soul ? new Date(soul.created_at).toLocaleString() : '—'}
+        />
+        <StatusRow
+          label="Head event hash"
+          value={soul?.head_event_hash ? shortHash(soul.head_event_hash) : '—'}
+          mono
+        />
+        <StatusRow
+          label="Entities"
+          value={
+            soul
+              ? `${activeCount} active, ${candidateCount} candidate, ${rejectedCount} rejected`
+              : '—'
+          }
+        />
       </Section>
 
       <Section title="Backup">
         <p style={{ fontSize: '13px', color: '#666', margin: '0 0 8px' }}>
-          Save an encrypted <code>.soul</code> backup. The file is protected with your passphrase and signed by this device. Restoring works on any machine that knows the passphrase.
+          Save an encrypted <code>.soul</code> backup. The file is protected with your passphrase
+          and signed by this device. Restoring works on any machine that knows the passphrase.
         </p>
         <button
           onClick={() => setModal({ kind: 'export-passphrase' })}
@@ -291,10 +341,18 @@ export function Settings({ soul, entities, onDataChanged, onGoHome }: SettingsPr
           Save encrypted backup (.soul)
         </button>
         <div style={{ display: 'flex', gap: '8px', marginTop: '8px' }}>
-          <button onClick={handleExportJson} disabled={!soul || busy !== null} style={secondaryBtnStyle}>
+          <button
+            onClick={handleExportJson}
+            disabled={!soul || busy !== null}
+            style={secondaryBtnStyle}
+          >
             Export JSON
           </button>
-          <button onClick={handleExportMarkdown} disabled={!soul || busy !== null} style={secondaryBtnStyle}>
+          <button
+            onClick={handleExportMarkdown}
+            disabled={!soul || busy !== null}
+            style={secondaryBtnStyle}
+          >
             Export Markdown
           </button>
         </div>
@@ -302,16 +360,53 @@ export function Settings({ soul, entities, onDataChanged, onGoHome }: SettingsPr
 
       <Section title="Restore">
         <p style={{ fontSize: '13px', color: '#666', margin: '0 0 8px' }}>
-          Import a <code>.soul</code> backup. The file is verified (signature, hash, schema) before anything changes, and restoring replaces the current local data after you confirm a preview.
+          Import a <code>.soul</code> backup. The file is verified (signature, hash, schema) before
+          anything changes, and restoring replaces the current local data after you confirm a
+          preview.
         </p>
         <button onClick={handleRestoreStart} disabled={busy !== null} style={secondaryBtnStyle}>
           Restore from backup
         </button>
       </Section>
 
+      <Section title="Local receipts">
+        <p style={{ fontSize: '13px', color: '#666', margin: '0 0 8px' }}>
+          Deletion and disclosure receipts stored on this device. Receipts contain no personal
+          content — only what happened, when and how much.
+        </p>
+        {receipts.length === 0 ? (
+          <p style={{ fontSize: '13px', color: '#9ca3af', margin: 0 }}>No receipts yet.</p>
+        ) : (
+          <div style={{ display: 'flex', flexDirection: 'column', gap: '6px' }}>
+            {receipts.map((r) => (
+              <div
+                key={r.file}
+                style={{
+                  display: 'flex',
+                  flexWrap: 'wrap',
+                  gap: '4px 12px',
+                  padding: '8px 10px',
+                  border: '1px solid #e5e7eb',
+                  borderRadius: '6px',
+                  fontSize: '12px',
+                  color: '#4b5563',
+                }}
+              >
+                <span style={{ fontWeight: 600 }}>{new Date(r.deleted_at).toLocaleString()}</span>
+                <span>{r.entity_count} entities removed</span>
+                <span>{r.event_count} events removed</span>
+                <span>keys deleted: {r.keys_deleted ? 'yes' : 'no'}</span>
+                <span style={{ color: '#9ca3af', wordBreak: 'break-all' }}>{r.file}</span>
+              </div>
+            ))}
+          </div>
+        )}
+      </Section>
+
       <Section title="Danger zone" danger>
         <p style={{ fontSize: '13px', color: '#b91c1c', margin: '0 0 8px' }}>
-          Deletes the active SOUL, all entities, events, device keys and local database content. A deletion receipt is written locally. Backups remain wherever you saved them.
+          Deletes the active SOUL, all entities, events, device keys and local database content. A
+          deletion receipt is written locally. Backups remain wherever you saved them.
         </p>
         <button
           onClick={() => setModal({ kind: 'delete-confirm' })}
@@ -322,9 +417,7 @@ export function Settings({ soul, entities, onDataChanged, onGoHome }: SettingsPr
         </button>
       </Section>
 
-      {busy && (
-        <div style={{ marginTop: '12px', fontSize: '13px', color: '#666' }}>{busy}</div>
-      )}
+      {busy && <div style={{ marginTop: '12px', fontSize: '13px', color: '#666' }}>{busy}</div>}
 
       {modal.kind === 'export-passphrase' && (
         <PassphraseModal
@@ -351,27 +444,51 @@ export function Settings({ soul, entities, onDataChanged, onGoHome }: SettingsPr
         <div style={modalBackdropStyle}>
           <div style={modalCardStyle}>
             <h3 style={{ margin: '0 0 12px' }}>Restore preview</h3>
-            <p style={{ fontSize: '13px', color: '#b91c1c', background: '#fef2f2', padding: '8px 12px', borderRadius: '6px', border: '1px solid #fecaca' }}>
+            <p
+              style={{
+                fontSize: '13px',
+                color: '#b91c1c',
+                background: '#fef2f2',
+                padding: '8px 12px',
+                borderRadius: '6px',
+                border: '1px solid #fecaca',
+              }}
+            >
               Restoring replaces the current local SOUL data.
             </p>
             <div style={{ fontSize: '13px', lineHeight: 1.7 }}>
               <PreviewRow label="Name" value={modal.preview.display_name} />
               <PreviewRow label="Soul ID" value={modal.preview.soul_id} mono />
-              <PreviewRow label="Created" value={new Date(modal.preview.created_at).toLocaleString()} />
+              <PreviewRow
+                label="Created"
+                value={new Date(modal.preview.created_at).toLocaleString()}
+              />
               <PreviewRow label="Entities" value={String(modal.preview.entity_count)} />
               <PreviewRow label="Events" value={String(modal.preview.event_count)} />
               <PreviewRow label="Calibration step" value={String(modal.preview.calibration_step)} />
               <PreviewRow label="Activated" value={modal.preview.activated ? 'yes' : 'no'} />
               {modal.preview.head_event_hash && (
-                <PreviewRow label="Head event hash" value={shortHash(modal.preview.head_event_hash)} mono />
+                <PreviewRow
+                  label="Head event hash"
+                  value={shortHash(modal.preview.head_event_hash)}
+                  mono
+                />
               )}
               {modal.preview.entity_counts.map((c) => (
                 <PreviewRow key={c.entity_type} label={c.entity_type} value={String(c.count)} />
               ))}
             </div>
-            <div style={{ marginTop: '16px', display: 'flex', gap: '8px', justifyContent: 'flex-end' }}>
-              <button onClick={closeModal} style={secondaryBtnStyle}>Cancel</button>
-              <button onClick={() => handleRestoreApply(modal.filePath, modal.password)} disabled={busy !== null} style={primaryBtnStyle}>
+            <div
+              style={{ marginTop: '16px', display: 'flex', gap: '8px', justifyContent: 'flex-end' }}
+            >
+              <button onClick={closeModal} style={secondaryBtnStyle}>
+                Cancel
+              </button>
+              <button
+                onClick={() => handleRestoreApply(modal.filePath, modal.password)}
+                disabled={busy !== null}
+                style={primaryBtnStyle}
+              >
                 {busy ? 'Restoring...' : 'Confirm restore'}
               </button>
             </div>
@@ -383,20 +500,26 @@ export function Settings({ soul, entities, onDataChanged, onGoHome }: SettingsPr
         <div style={modalBackdropStyle}>
           <div style={modalCardStyle}>
             <h3 style={{ margin: '0 0 8px' }}>Restore complete</h3>
-            <p style={{ fontSize: '13px', color: '#666' }}>The backup has been restored. Your SOUL is ready.</p>
+            <p style={{ fontSize: '13px', color: '#666' }}>
+              The backup has been restored. Your SOUL is ready.
+            </p>
             <div style={{ marginTop: '16px', display: 'flex', justifyContent: 'flex-end' }}>
-              <button onClick={() => { closeModal(); onGoHome(); }} style={primaryBtnStyle}>Go to Home</button>
+              <button
+                onClick={() => {
+                  closeModal();
+                  onGoHome();
+                }}
+                style={primaryBtnStyle}
+              >
+                Go to Home
+              </button>
             </div>
           </div>
         </div>
       )}
 
       {modal.kind === 'delete-confirm' && (
-        <DeleteConfirmModal
-          busy={busy !== null}
-          onConfirm={handleDelete}
-          onClose={closeModal}
-        />
+        <DeleteConfirmModal busy={busy !== null} onConfirm={handleDelete} onClose={closeModal} />
       )}
 
       {modal.kind === 'delete-receipt' && (
@@ -407,13 +530,27 @@ export function Settings({ soul, entities, onDataChanged, onGoHome }: SettingsPr
               All local SOUL data was removed. This receipt is stored locally for your reference.
             </p>
             <div style={{ fontSize: '13px', lineHeight: 1.7 }}>
-              <PreviewRow label="Deleted at" value={new Date(modal.receipt.deleted_at).toLocaleString()} />
+              <PreviewRow
+                label="Deleted at"
+                value={new Date(modal.receipt.deleted_at).toLocaleString()}
+              />
               <PreviewRow label="Entities removed" value={String(modal.receipt.entity_count)} />
               <PreviewRow label="Events removed" value={String(modal.receipt.event_count)} />
-              <PreviewRow label="Device keys removed" value={modal.receipt.keys_deleted ? 'yes' : 'no'} />
+              <PreviewRow
+                label="Device keys removed"
+                value={modal.receipt.keys_deleted ? 'yes' : 'no'}
+              />
             </div>
             <div style={{ marginTop: '16px', display: 'flex', justifyContent: 'flex-end' }}>
-              <button onClick={() => { closeModal(); onGoHome(); }} style={primaryBtnStyle}>Done</button>
+              <button
+                onClick={() => {
+                  closeModal();
+                  onGoHome();
+                }}
+                style={primaryBtnStyle}
+              >
+                Done
+              </button>
             </div>
           </div>
         </div>
@@ -422,10 +559,28 @@ export function Settings({ soul, entities, onDataChanged, onGoHome }: SettingsPr
   );
 }
 
-function Section({ title, children, danger }: { title: string; children: React.ReactNode; danger?: boolean }) {
+function Section({
+  title,
+  children,
+  danger,
+}: {
+  title: string;
+  children: React.ReactNode;
+  danger?: boolean;
+}) {
   return (
-    <div style={{ marginTop: '24px', padding: '16px', border: danger ? '1px solid #fecaca' : '1px solid #e5e7eb', borderRadius: '10px', background: danger ? '#fffbfb' : '#fff' }}>
-      <h3 style={{ margin: '0 0 8px', fontSize: '15px', color: danger ? '#b91c1c' : '#111' }}>{title}</h3>
+    <div
+      style={{
+        marginTop: '24px',
+        padding: '16px',
+        border: danger ? '1px solid #fecaca' : '1px solid #e5e7eb',
+        borderRadius: '10px',
+        background: danger ? '#fffbfb' : '#fff',
+      }}
+    >
+      <h3 style={{ margin: '0 0 8px', fontSize: '15px', color: danger ? '#b91c1c' : '#111' }}>
+        {title}
+      </h3>
       {children}
     </div>
   );
@@ -433,9 +588,25 @@ function Section({ title, children, danger }: { title: string; children: React.R
 
 function StatusRow({ label, value, mono }: { label: string; value: string; mono?: boolean }) {
   return (
-    <div style={{ display: 'flex', justifyContent: 'space-between', gap: '16px', padding: '4px 0', fontSize: '13px' }}>
+    <div
+      style={{
+        display: 'flex',
+        justifyContent: 'space-between',
+        gap: '16px',
+        padding: '4px 0',
+        fontSize: '13px',
+      }}
+    >
       <span style={{ color: '#888' }}>{label}</span>
-      <span style={{ fontFamily: mono ? 'Consolas, monospace' : 'inherit', wordBreak: 'break-all', textAlign: 'right' }}>{value}</span>
+      <span
+        style={{
+          fontFamily: mono ? 'Consolas, monospace' : 'inherit',
+          wordBreak: 'break-all',
+          textAlign: 'right',
+        }}
+      >
+        {value}
+      </span>
     </div>
   );
 }
@@ -444,13 +615,26 @@ function PreviewRow({ label, value, mono }: { label: string; value: string; mono
   return (
     <div style={{ display: 'flex', justifyContent: 'space-between', gap: '16px' }}>
       <span style={{ color: '#888' }}>{label}</span>
-      <span style={{ fontFamily: mono ? 'Consolas, monospace' : 'inherit', wordBreak: 'break-all', textAlign: 'right' }}>{value}</span>
+      <span
+        style={{
+          fontFamily: mono ? 'Consolas, monospace' : 'inherit',
+          wordBreak: 'break-all',
+          textAlign: 'right',
+        }}
+      >
+        {value}
+      </span>
     </div>
   );
 }
 
 function PassphraseModal({
-  title, confirmLabel, busy, requireConfirmation, onSubmit, onClose,
+  title,
+  confirmLabel,
+  busy,
+  requireConfirmation,
+  onSubmit,
+  onClose,
 }: {
   title: string;
   confirmLabel: string;
@@ -496,9 +680,13 @@ function PassphraseModal({
             style={{ ...inputStyle, marginTop: '8px' }}
           />
         )}
-        {localError && <p style={{ color: '#dc2626', fontSize: '12px', margin: '8px 0 0' }}>{localError}</p>}
+        {localError && (
+          <p style={{ color: '#dc2626', fontSize: '12px', margin: '8px 0 0' }}>{localError}</p>
+        )}
         <div style={{ marginTop: '16px', display: 'flex', gap: '8px', justifyContent: 'flex-end' }}>
-          <button onClick={onClose} disabled={busy} style={secondaryBtnStyle}>Cancel</button>
+          <button onClick={onClose} disabled={busy} style={secondaryBtnStyle}>
+            Cancel
+          </button>
           <button onClick={submit} disabled={busy} style={primaryBtnStyle}>
             {busy ? 'Working...' : confirmLabel}
           </button>
@@ -509,7 +697,9 @@ function PassphraseModal({
 }
 
 function DeleteConfirmModal({
-  busy, onConfirm, onClose,
+  busy,
+  onConfirm,
+  onClose,
 }: {
   busy: boolean;
   onConfirm: () => void;
@@ -532,7 +722,8 @@ function DeleteConfirmModal({
       <div style={modalCardStyle}>
         <h3 style={{ margin: '0 0 12px', color: '#b91c1c' }}>Delete all local data?</h3>
         <p style={{ fontSize: '13px', color: '#666', margin: '0 0 12px' }}>
-          This permanently deletes your SOUL, entities, events, calibration and device keys on this machine. This cannot be undone.
+          This permanently deletes your SOUL, entities, events, calibration and device keys on this
+          machine. This cannot be undone.
         </p>
         <input
           type="text"
@@ -541,9 +732,13 @@ function DeleteConfirmModal({
           placeholder="Type DELETE"
           style={inputStyle}
         />
-        {localError && <p style={{ color: '#dc2626', fontSize: '12px', margin: '8px 0 0' }}>{localError}</p>}
+        {localError && (
+          <p style={{ color: '#dc2626', fontSize: '12px', margin: '8px 0 0' }}>{localError}</p>
+        )}
         <div style={{ marginTop: '16px', display: 'flex', gap: '8px', justifyContent: 'flex-end' }}>
-          <button onClick={onClose} disabled={busy} style={secondaryBtnStyle}>Cancel</button>
+          <button onClick={onClose} disabled={busy} style={secondaryBtnStyle}>
+            Cancel
+          </button>
           <button onClick={submit} disabled={busy} style={dangerBtnStyle}>
             {busy ? 'Deleting...' : 'Delete everything'}
           </button>
@@ -564,44 +759,84 @@ function formatSize(bytes: number): string {
 }
 
 const modalBackdropStyle: React.CSSProperties = {
-  position: 'fixed', inset: 0, background: 'rgba(0,0,0,0.4)',
-  display: 'flex', alignItems: 'center', justifyContent: 'center', zIndex: 100,
+  position: 'fixed',
+  inset: 0,
+  background: 'rgba(0,0,0,0.4)',
+  display: 'flex',
+  alignItems: 'center',
+  justifyContent: 'center',
+  zIndex: 100,
 };
 
 const modalCardStyle: React.CSSProperties = {
-  background: '#fff', borderRadius: '12px', padding: '20px',
-  width: 'min(480px, 90vw)', boxShadow: '0 10px 40px rgba(0,0,0,0.2)',
+  background: '#fff',
+  borderRadius: '12px',
+  padding: '20px',
+  width: 'min(480px, 90vw)',
+  boxShadow: '0 10px 40px rgba(0,0,0,0.2)',
 };
 
 const inputStyle: React.CSSProperties = {
-  width: '100%', padding: '8px 12px', border: '1px solid #d1d5db', borderRadius: '6px', boxSizing: 'border-box',
+  width: '100%',
+  padding: '8px 12px',
+  border: '1px solid #d1d5db',
+  borderRadius: '6px',
+  boxSizing: 'border-box',
 };
 
 const primaryBtnStyle: React.CSSProperties = {
-  padding: '8px 20px', background: '#6366f1', color: '#fff',
-  border: 'none', borderRadius: '6px', cursor: 'pointer', fontWeight: 600,
+  padding: '8px 20px',
+  background: '#6366f1',
+  color: '#fff',
+  border: 'none',
+  borderRadius: '6px',
+  cursor: 'pointer',
+  fontWeight: 600,
 };
 
 const secondaryBtnStyle: React.CSSProperties = {
-  padding: '8px 20px', background: '#f3f4f6', color: '#333',
-  border: '1px solid #d1d5db', borderRadius: '6px', cursor: 'pointer',
+  padding: '8px 20px',
+  background: '#f3f4f6',
+  color: '#333',
+  border: '1px solid #d1d5db',
+  borderRadius: '6px',
+  cursor: 'pointer',
 };
 
 const dangerBtnStyle: React.CSSProperties = {
-  padding: '8px 20px', background: '#dc2626', color: '#fff',
-  border: 'none', borderRadius: '6px', cursor: 'pointer', fontWeight: 600,
+  padding: '8px 20px',
+  background: '#dc2626',
+  color: '#fff',
+  border: 'none',
+  borderRadius: '6px',
+  cursor: 'pointer',
+  fontWeight: 600,
 };
 
 const errorStyle: React.CSSProperties = {
-  padding: '8px 12px', background: '#fef2f2', border: '1px solid #fecaca',
-  borderRadius: '6px', margin: '12px 0', color: '#dc2626', fontSize: '13px',
+  padding: '8px 12px',
+  background: '#fef2f2',
+  border: '1px solid #fecaca',
+  borderRadius: '6px',
+  margin: '12px 0',
+  color: '#dc2626',
+  fontSize: '13px',
 };
 
 const successStyle: React.CSSProperties = {
-  padding: '8px 12px', background: '#f0fdf4', border: '1px solid #bbf7d0',
-  borderRadius: '6px', margin: '12px 0', color: '#16a34a', fontSize: '13px',
+  padding: '8px 12px',
+  background: '#f0fdf4',
+  border: '1px solid #bbf7d0',
+  borderRadius: '6px',
+  margin: '12px 0',
+  color: '#16a34a',
+  fontSize: '13px',
 };
 
 const dismissBtnStyle: React.CSSProperties = {
-  marginLeft: '8px', background: 'none', border: 'none', cursor: 'pointer', color: 'inherit',
+  marginLeft: '8px',
+  background: 'none',
+  border: 'none',
+  cursor: 'pointer',
+  color: 'inherit',
 };

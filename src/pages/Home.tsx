@@ -1,4 +1,5 @@
 import { TOTAL_STEPS } from '../data/calibration';
+import { buildControlCenter, type ActionItem } from '../data/control';
 
 interface SoulInfo {
   soul_id: string;
@@ -15,13 +16,16 @@ interface HomeProps {
   onStartCalibration: () => void;
   onContinueCalibration: () => void;
   onGoToPreview: () => void;
+  onGoToInbox: () => void;
+  onGoToSettings: () => void;
   displayName: string;
   onDisplayNameChange: (v: string) => void;
   error: string | null;
   loading: boolean;
   entityCount: number;
   candidateCount: number;
-  onGoToInbox: () => void;
+  rejectedCount: number;
+  previewConfirmed: boolean;
 }
 
 export function Home({
@@ -30,13 +34,16 @@ export function Home({
   onStartCalibration,
   onContinueCalibration,
   onGoToPreview,
+  onGoToInbox,
+  onGoToSettings,
   displayName,
   onDisplayNameChange,
   error,
   loading,
   entityCount,
   candidateCount,
-  onGoToInbox,
+  rejectedCount,
+  previewConfirmed,
 }: HomeProps) {
   if (loading) {
     return (
@@ -66,17 +73,7 @@ export function Home({
               flex: '1 1 180px',
             }}
           />
-          <button
-            onClick={onCreate}
-            style={{
-              padding: '8px 20px',
-              background: '#6366f1',
-              color: '#fff',
-              border: 'none',
-              borderRadius: '6px',
-              cursor: 'pointer',
-            }}
-          >
+          <button onClick={onCreate} style={ctaBtnStyle}>
             Create SOUL
           </button>
         </div>
@@ -85,62 +82,28 @@ export function Home({
     );
   }
 
-  const calibrationDone = soul.calibration_step >= TOTAL_STEPS;
-  const calibrationStarted = soul.calibration_step > 0;
+  const center = buildControlCenter({
+    hasSoul: true,
+    activated: soul.activated,
+    calibrationStep: soul.calibration_step,
+    totalSteps: TOTAL_STEPS,
+    previewConfirmed,
+    candidateCount,
+  });
 
-  const dominantCta = () => {
-    if (!soul.activated && !calibrationStarted) {
-      return (
-        <div style={{ marginTop: '16px' }}>
-          <button onClick={onStartCalibration} style={ctaBtnStyle}>
-            Start Calibration (5 min)
-          </button>
-          <p style={{ fontSize: '13px', color: '#888', marginTop: '8px' }}>
-            Build a useful local SOUL — no account, no imports, works offline.
-          </p>
-        </div>
-      );
+  const runAction = (a: ActionItem) => {
+    if (a.disabled) return;
+    if (a.target === 'calibration') {
+      if (center.state === 'start-calibration') onStartCalibration();
+      else onContinueCalibration();
+      return;
     }
-    if (!soul.activated && !calibrationDone) {
-      return (
-        <div style={{ marginTop: '16px' }}>
-          <button onClick={onContinueCalibration} style={ctaBtnStyle}>
-            Continue Calibration
-          </button>
-          <p style={{ fontSize: '13px', color: '#888', marginTop: '8px' }}>
-            Step {Math.min(soul.calibration_step + 1, TOTAL_STEPS)} of {TOTAL_STEPS}. Your progress
-            is saved.
-          </p>
-        </div>
-      );
-    }
-    if (!soul.activated) {
-      return (
-        <div style={{ marginTop: '16px' }}>
-          <button onClick={onGoToPreview} style={{ ...ctaBtnStyle, background: '#22c55e' }}>
-            Review & Activate
-          </button>
-          <p style={{ fontSize: '13px', color: '#888', marginTop: '8px' }}>
-            Calibration is complete. Review what SOUL learned, confirm the preview, then activate.
-            Sensitive items always need individual confirmation.
-          </p>
-        </div>
-      );
-    }
-    return (
-      <div style={{ marginTop: '16px' }}>
-        <button
-          style={{ ...ctaBtnStyle, background: '#d1d5db', color: '#6b7280', cursor: 'default' }}
-          disabled
-        >
-          Connect an AI client — coming soon
-        </button>
-        <p style={{ fontSize: '13px', color: '#888', marginTop: '8px' }}>
-          Your SOUL is active. The next step is connecting it to the AI tools you already use.
-        </p>
-      </div>
-    );
+    if (a.target === 'preview') onGoToPreview();
+    if (a.target === 'inbox') onGoToInbox();
+    if (a.target === 'settings') onGoToSettings();
   };
+
+  const primary = center.next;
 
   return (
     <div>
@@ -148,63 +111,88 @@ export function Home({
       <p style={{ color: '#666' }}>Personal Intelligence Runtime</p>
 
       <div style={{ marginTop: '16px', display: 'flex', gap: '24px', flexWrap: 'wrap' }}>
+        <Stat label="Status" value={center.statusLabel} />
         <Stat label="Confirmed entities" value={entityCount} />
         <Stat label="Candidates" value={candidateCount} />
+        <Stat label="Rejected" value={rejectedCount} />
         <Stat label="Connected AI clients" value={0} />
-        <Stat label="Status" value={soul.activated ? 'Active' : 'Setup'} />
+        <Stat
+          label="Calibration"
+          value={
+            soul.calibration_step >= TOTAL_STEPS
+              ? 'Done'
+              : `${soul.calibration_step}/${TOTAL_STEPS}`
+          }
+        />
       </div>
-
-      {dominantCta()}
 
       <div
         style={{
-          marginTop: '16px',
-          display: 'flex',
-          gap: '12px',
-          flexWrap: 'wrap',
-          fontSize: '13px',
+          marginTop: '20px',
+          padding: '18px',
+          border: primary.disabled ? '1px solid #e5e7eb' : '1px solid #c7d2fe',
+          borderRadius: '10px',
+          background: primary.disabled ? '#fafafa' : '#f5f6ff',
         }}
       >
-        {soul.activated && (
-          <a
-            href="#"
-            onClick={(e) => {
-              e.preventDefault();
-              onGoToInbox();
-            }}
-            style={{ color: '#6366f1' }}
-          >
-            Review candidates ({candidateCount})
-          </a>
-        )}
-        {soul.activated && (
-          <span
-            style={{ color: '#cbd5e1', cursor: 'not-allowed' }}
-            title="Available in a later update"
-          >
-            Blind test — soon
-          </span>
-        )}
-        {soul.activated && (
-          <span
-            style={{ color: '#cbd5e1', cursor: 'not-allowed' }}
-            title="Available in a later update"
-          >
-            Improve SOUL — soon
-          </span>
-        )}
-        {!soul.activated && (
-          <a
-            href="#"
-            onClick={(e) => {
-              e.preventDefault();
-              onGoToInbox();
-            }}
-            style={{ color: '#6366f1' }}
-          >
-            Review candidates ({candidateCount})
-          </a>
-        )}
+        <div style={{ fontSize: '12px', color: '#6b7280', fontWeight: 600, marginBottom: '8px' }}>
+          NEXT STEP
+        </div>
+        <button
+          onClick={() => runAction(primary)}
+          disabled={primary.disabled}
+          style={{
+            ...ctaBtnStyle,
+            background: primary.disabled ? '#d1d5db' : soul.activated ? '#22c55e' : '#6366f1',
+            color: primary.disabled ? '#6b7280' : '#fff',
+            cursor: primary.disabled ? 'default' : 'pointer',
+          }}
+        >
+          {primary.label}
+        </button>
+        <p style={{ fontSize: '13px', color: '#888', marginTop: '10px' }}>{primary.note}</p>
+      </div>
+
+      <div style={{ marginTop: '16px' }}>
+        <div style={{ fontSize: '12px', color: '#6b7280', fontWeight: 600, marginBottom: '8px' }}>
+          OTHER ACTIONS
+        </div>
+        <div style={{ display: 'flex', flexDirection: 'column', gap: '8px' }}>
+          {center.secondary.map((a) => (
+            <button
+              key={a.id}
+              onClick={() => runAction(a)}
+              disabled={a.disabled}
+              title={a.note}
+              style={{
+                display: 'flex',
+                alignItems: 'center',
+                gap: '10px',
+                padding: '10px 12px',
+                border: '1px solid #e5e7eb',
+                borderRadius: '8px',
+                background: a.disabled ? '#fafafa' : '#fff',
+                cursor: a.disabled ? 'default' : 'pointer',
+                textAlign: 'left',
+                width: '100%',
+              }}
+            >
+              <span
+                style={{
+                  fontSize: '13px',
+                  fontWeight: 600,
+                  color: a.disabled ? '#9ca3af' : '#374151',
+                  flex: '1',
+                }}
+              >
+                {a.label}
+              </span>
+              <span style={{ fontSize: '12px', color: a.disabled ? '#d1d5db' : '#9ca3af' }}>
+                {a.disabled ? 'soon' : '→'}
+              </span>
+            </button>
+          ))}
+        </div>
       </div>
 
       <details style={{ marginTop: '20px', opacity: 0.6 }}>
@@ -226,11 +214,8 @@ function Stat({ label, value }: { label: string; value: number | string }) {
 
 const ctaBtnStyle: React.CSSProperties = {
   padding: '10px 24px',
-  background: '#6366f1',
-  color: '#fff',
   border: 'none',
   borderRadius: '8px',
-  cursor: 'pointer',
   fontWeight: 600,
   fontSize: '15px',
 };

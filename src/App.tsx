@@ -417,13 +417,16 @@ export function App() {
           onStartCalibration={handleStartCalibration}
           onContinueCalibration={() => setShowCalibration(true)}
           onGoToPreview={() => setTab('preview')}
+          onGoToInbox={() => setTab('inbox')}
+          onGoToSettings={() => setTab('settings')}
           displayName={displayName}
           onDisplayNameChange={setDisplayName}
           error={null}
           loading={loading}
           entityCount={entities.filter((e) => e.status === 'active').length}
           candidateCount={candidateCount}
-          onGoToInbox={() => setTab('inbox')}
+          rejectedCount={entities.filter((e) => e.status === 'rejected').length}
+          previewConfirmed={soul ? soul.preview_confirmed : false}
         />
       ) : tab === 'inbox' ? (
         <Inbox

@@ -7,7 +7,10 @@ use db::{
     get_calibration, save_calibration, activate_soul, is_soul_activated,
     update_entity, activate_preview, confirm_soul_preview, reset_soul_preview,
 };
-use package::{ExportReceipt, ImportPreview, DeletionReceipt, JsonExportReceipt, MarkdownExportReceipt};
+use package::{
+    ExportReceipt, ImportPreview, DeletionReceipt, JsonExportReceipt, MarkdownExportReceipt,
+    ReceiptSummary,
+};
 use serde::{Deserialize, Serialize};
 use std::sync::Mutex;
 use tauri::Manager;
@@ -305,6 +308,12 @@ fn export_soul_markdown_cmd(
 }
 
 #[tauri::command]
+fn list_receipts_cmd(app: tauri::AppHandle) -> Result<Vec<ReceiptSummary>, String> {
+    let app_dir = app.path().app_data_dir().map_err(|e| e.to_string())?;
+    package::list_local_receipts(&app_dir)
+}
+
+#[tauri::command]
 fn delete_soul_cmd(
     state: tauri::State<AppState>,
     app: tauri::AppHandle,
@@ -346,6 +355,7 @@ pub fn run() {
             export_soul_json_cmd,
             export_soul_markdown_cmd,
             delete_soul_cmd,
+            list_receipts_cmd,
         ])
         .setup(|app| {
             let app_dir = app.path().app_data_dir().expect("Failed to get app data dir");

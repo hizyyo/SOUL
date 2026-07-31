@@ -109,12 +109,56 @@ pub struct ImportPreview {
     pub entity_counts: Vec<EntityCount>,
 }
 
-#[derive(Debug, Serialize)]
+#[derive(Debug, Serialize, Deserialize)]
 pub struct DeletionReceipt {
     pub deleted_at: String,
     pub entity_count: i64,
     pub event_count: i64,
     pub keys_deleted: bool,
+}
+
+#[derive(Debug, Serialize)]
+pub struct ReceiptSummary {
+    pub file: String,
+    pub deleted_at: String,
+    pub entity_count: i64,
+    pub event_count: i64,
+    pub keys_deleted: bool,
+}
+
+/// Список локальных квитанций (deletion-*.json) из каталога receipts.
+/// Повреждённые или неожиданные файлы пропускаются — одна битая квитанция
+/// не роняет весь список. Сортировка: свежие первыми.
+pub fn list_local_receipts(app_dir: &Path) -> Result<Vec<ReceiptSummary>, String> {
+    let receipts_dir = app_dir.join("receipts");
+    if !receipts_dir.exists() {
+        return Ok(Vec::new());
+    }
+    let mut receipts = Vec::new();
+    let entries = std::fs::read_dir(&receipts_dir)
+        .map_err(|e| format!("Cannot read receipts: {e}"))?;
+    for entry in entries.flatten() {
+        let path = entry.path();
+        if path.extension().and_then(|e| e.to_str()) != Some("json") {
+            continue;
+        }
+        if let Ok(text) = std::fs::read_to_string(&path) {
+            if let Ok(r) = serde_json::from_str::<DeletionReceipt>(&text) {
+                receipts.push(ReceiptSummary {
+                    file: path
+                        .file_name()
+                        .map(|f| f.to_string_lossy().to_string())
+                        .unwrap_or_default(),
+                    deleted_at: r.deleted_at,
+                    entity_count: r.entity_count,
+                    event_count: r.event_count,
+                    keys_deleted: r.keys_deleted,
+                });
+            }
+        }
+    }
+    receipts.sort_by(|a, b| b.deleted_at.cmp(&a.deleted_at));
+    Ok(receipts)
 }
 
 #[derive(Debug)]
@@ -809,6 +853,50 @@ mod tests {
 
         let fresh = init_db(&env.dir).unwrap();
         assert!(list_souls(&fresh).unwrap().is_empty());
+    }
+
+    #[test]
+    fn list_receipts_returns_empty_when_no_receipts_dir() {
+        let env = TestEnv::new();
+        assert!(list_local_receipts(&env.dir).unwrap().is_empty());
+    }
+
+    #[test]
+    fn list_receipts_lists_wipe_receipts_sorted_and_skips_corrupted() {
+        let mut env = TestEnv::new();
+        let soul_id = create_seeded_soul(&mut env);
+        wipe_local_data(&env.conn, &env.dir, &soul_id).unwrap();
+
+        let receipts_dir = env.dir.join("receipts");
+        std::fs::write(receipts_dir.join("deletion-corrupted.json"), "not json").unwrap();
+        std::fs::write(receipts_dir.join("notes.txt"), "ignore me").unwrap();
+
+        let receipts = list_local_receipts(&env.dir).unwrap();
+        assert_eq!(receipts.len(), 1);
+        let r = &receipts[0];
+        assert!(r.file.starts_with("deletion-"));
+        assert_eq!(r.entity_count, 2);
+        assert!(r.keys_deleted);
+    }
+
+    #[test]
+    fn list_receipts_sorts_by_deleted_at_desc() {
+        let env = TestEnv::new();
+        let receipts_dir = env.dir.join("receipts");
+        std::fs::create_dir_all(&receipts_dir).unwrap();
+        for (name, ts) in [
+            ("deletion-old.json", "2026-01-01T00:00:00Z"),
+            ("deletion-new.json", "2026-07-31T00:00:00Z"),
+        ] {
+            let body = format!(
+                r#"{{"deleted_at":"{ts}","entity_count":1,"event_count":2,"keys_deleted":true}}"#
+            );
+            std::fs::write(receipts_dir.join(name), body).unwrap();
+        }
+        let receipts = list_local_receipts(&env.dir).unwrap();
+        assert_eq!(receipts.len(), 2);
+        assert_eq!(receipts[0].file, "deletion-new.json");
+        assert_eq!(receipts[1].file, "deletion-old.json");
     }
 
     #[test]
