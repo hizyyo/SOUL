@@ -85,8 +85,8 @@ export function buildControlCenter(input: {
       id: 'connect-ai-client',
       label: 'Connect an AI client',
       target: 'settings',
-      disabled: true,
-      note: 'Coming in a later update. Your SOUL is active and local.',
+      disabled: false,
+      note: 'Your SOUL is active and local. Connect a supported AI client (Claude Code, Codex, Cursor) in Settings.',
     };
   }
 

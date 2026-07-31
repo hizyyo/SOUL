@@ -26,6 +26,7 @@ interface HomeProps {
   candidateCount: number;
   rejectedCount: number;
   previewConfirmed: boolean;
+  connectedClients: number;
 }
 
 export function Home({
@@ -44,6 +45,7 @@ export function Home({
   candidateCount,
   rejectedCount,
   previewConfirmed,
+  connectedClients,
 }: HomeProps) {
   if (loading) {
     return (
@@ -115,7 +117,7 @@ export function Home({
         <Stat label="Confirmed entities" value={entityCount} />
         <Stat label="Candidates" value={candidateCount} />
         <Stat label="Rejected" value={rejectedCount} />
-        <Stat label="Connected AI clients" value={0} />
+        <Stat label="Connected AI clients" value={connectedClients} />
         <Stat
           label="Calibration"
           value={

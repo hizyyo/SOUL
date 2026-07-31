@@ -351,7 +351,67 @@ describe('determinism and stability', () => {
   });
 });
 
+describe('cross-language golden layout (mirrors src-tauri/src/context.rs)', () => {
+  it('serializes the same fixture byte-for-byte as the Rust port', () => {
+    // Та же фикстура, что и в golden_serialization_matches_ts_layout в Rust.
+    const dataFor2 = (over: Record<string, unknown>): string =>
+      JSON.stringify({
+        claim: 'Q — placeholder',
+        evidence: 'stated',
+        questionId: 'pref_speed',
+        value: 'x',
+        confidence: 0.9,
+        sensitivity: 'internal',
+        scope: { domains: ['preferences'], projects: [], people: [], channels: [] },
+        ...over,
+      });
+    const entA = entityData(
+      dataFor2({ claim: 'Q — concise', questionId: 'pref_speed', value: 'concise', confidence: 0.9 }),
+      { id: 'ent_a', created_at: '2026-07-01T00:00:00Z', updated_at: '2026-07-10T00:00:00Z' },
+    );
+    const entB = entityData(
+      dataFor2({ claim: 'Q — detailed', questionId: 'pref_speed', value: 'detailed', confidence: 0.8 }),
+      { id: 'ent_b', created_at: '2026-05-01T00:00:00Z', updated_at: '2026-06-01T00:00:00Z' },
+    );
+    const entC = entityData(
+      dataFor2({ claim: 'Q — never', questionId: 'bound_health', value: 'never', confidence: 0.8 }),
+      { id: 'ent_c', entity_type: 'boundary', created_at: '2026-06-15T00:00:00Z', updated_at: '2026-07-05T00:00:00Z' },
+    );
+
+    const pack = compileContext([entA, entB, entC], query({}));
+    expect(pack.items.map((i) => i.id)).toEqual(['ent_c', 'ent_a']);
+    expect(pack.conflicts).toHaveLength(1);
+    expect(pack.supersededIds).toEqual(['ent_b']);
+
+    // Золотой литерал: жёстко совпадает с ожиданием Rust-порта.
+    const expected =
+      'SOUL CONTEXT\n' +
+      'policy: soul-context-policy/1\n' +
+      'state: 5b38f537\n' +
+      `tokens: ${estimateTokens(
+        'SOUL CONTEXT\npolicy: soul-context-policy/1\nstate: 5b38f537\ntokens: X of 900\nentities: 2\n[ent_c] boundary / active / internal\nQ — never\nevidence: stated\n[ent_a] preference / active / internal\nQ — concise\nevidence: stated\nCONFLICTS:\n- ent_a vs ent_b: Same calibration question (pref_speed) with different answers\nSUPERSEDED: ent_b',
+      ).toLocaleString('en-US')} of 900\n` +
+      'entities: 2\n' +
+      '[ent_c] boundary / active / internal\n' +
+      'Q — never\n' +
+      'evidence: stated\n' +
+      '[ent_a] preference / active / internal\n' +
+      'Q — concise\n' +
+      'evidence: stated\n' +
+      'CONFLICTS:\n' +
+      '- ent_a vs ent_b: Same calibration question (pref_speed) with different answers\n' +
+      'SUPERSEDED: ent_b';
+    expect(pack.serialized).toBe(expected);
+    expect(pack.stateVersion).toBe('5b38f537');
+    // Оценка применяется к реальному сериализованному пакету («110» на 2
+    // символа длиннее «X») — этот сдвиг зафиксирован в обоих языках.
+    expect(pack.tokenEstimate).toBe(110);
+    expect(pack.tokenEstimate).toBe(estimateTokens(expected));
+  });
+});
+
 describe('helpers', () => {
+
   it('collectDomains gathers unique sorted domains', () => {
     const a = entityData(dataFor({ scope: { domains: ['goals'], projects: [], people: [], channels: [] } }));
     const b = entityData(dataFor({ scope: { domains: ['preferences'], projects: [], people: [], channels: [] } }));

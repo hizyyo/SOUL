@@ -96,8 +96,18 @@ export function App() {
   const [calAnswers, setCalAnswers] = useState<CalibrationAnswer[]>([]);
   const [busyEntityId, setBusyEntityId] = useState<string | null>(null);
   const [lastReview, setLastReview] = useState<LastReview | null>(null);
+  const [connectedClients, setConnectedClients] = useState(0);
 
   const deviceId = getDeviceId();
+
+  const loadConnectedClients = async () => {
+    try {
+      const statuses = await invoke<{ connected: boolean }[]>('detect_clients_cmd');
+      setConnectedClients(statuses.filter((s) => s.connected).length);
+    } catch {
+      setConnectedClients(0);
+    }
+  };
 
   const loadData = async () => {
     try {
@@ -131,12 +141,18 @@ export function App() {
     const avail = isTauri();
     setTauriAvailable(avail);
     if (avail) {
-      loadData().finally(() => setLoading(false));
+      loadData()
+        .then(() => loadConnectedClients())
+        .finally(() => setLoading(false));
     } else {
       setLoading(false);
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
+
+  useEffect(() => {
+    if (tab === 'settings') void loadConnectedClients();
+  }, [tab]);
 
   const refreshEntities = async (soulId: string) => {
     const ents = await invoke<EntityInfo[]>('list_entities_cmd', { soulId });
@@ -427,6 +443,7 @@ export function App() {
           candidateCount={candidateCount}
           rejectedCount={entities.filter((e) => e.status === 'rejected').length}
           previewConfirmed={soul ? soul.preview_confirmed : false}
+          connectedClients={connectedClients}
         />
       ) : tab === 'inbox' ? (
         <Inbox

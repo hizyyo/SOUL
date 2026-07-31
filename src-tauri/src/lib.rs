@@ -1,6 +1,10 @@
 mod crypto;
 mod db;
+mod integrations;
 mod package;
+mod context;
+
+pub mod mcp;
 
 use db::{
     init_db, create_soul, add_entity, list_entities, get_soul, list_souls,
@@ -336,6 +340,44 @@ fn delete_soul_cmd(
     package::wipe_local_data(&conn, &app_dir, &soul_id)
 }
 
+#[tauri::command]
+fn detect_clients_cmd(app: tauri::AppHandle) -> Result<Vec<integrations::ClientStatus>, String> {
+    let app_dir = app.path().app_data_dir().map_err(|e| e.to_string())?;
+    let binary = integrations::server_binary_path();
+    Ok(integrations::detect_clients(&app_dir, &binary))
+}
+
+#[tauri::command]
+fn connect_client_cmd(
+    app: tauri::AppHandle,
+    client: String,
+) -> Result<integrations::ClientStatus, String> {
+    let client: integrations::ClientId = client.parse().map_err(|e: String| e)?;
+    let app_dir = app.path().app_data_dir().map_err(|e| e.to_string())?;
+    let binary = integrations::server_binary_path();
+    integrations::connect_client(&app_dir, &binary, client)
+}
+
+#[tauri::command]
+fn disconnect_client_cmd(
+    app: tauri::AppHandle,
+    client: String,
+) -> Result<integrations::ClientStatus, String> {
+    let client: integrations::ClientId = client.parse().map_err(|e: String| e)?;
+    let app_dir = app.path().app_data_dir().map_err(|e| e.to_string())?;
+    integrations::disconnect_client(&app_dir, client)
+}
+
+#[tauri::command]
+fn rollback_client_cmd(
+    app: tauri::AppHandle,
+    client: String,
+) -> Result<integrations::ClientStatus, String> {
+    let client: integrations::ClientId = client.parse().map_err(|e: String| e)?;
+    let app_dir = app.path().app_data_dir().map_err(|e| e.to_string())?;
+    integrations::rollback_client(&app_dir, client)
+}
+
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     tauri::Builder::default()
@@ -369,6 +411,10 @@ pub fn run() {
             export_soul_markdown_cmd,
             delete_soul_cmd,
             list_receipts_cmd,
+            detect_clients_cmd,
+            connect_client_cmd,
+            disconnect_client_cmd,
+            rollback_client_cmd,
         ])
         .setup(|app| {
             let app_dir = app.path().app_data_dir().expect("Failed to get app data dir");

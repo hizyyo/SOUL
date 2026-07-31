@@ -1,5 +1,11 @@
 import { useEffect, useState } from 'react';
 import { open, save } from '@tauri-apps/plugin-dialog';
+import {
+  CLIENT_IDS,
+  clientStateLabel,
+  clientStatusNote,
+  type ClientStatus,
+} from '../data/integrations';
 
 interface SoulInfo {
   soul_id: string;
@@ -64,10 +70,15 @@ interface DeletionReceipt {
 
 interface ReceiptSummary {
   file: string;
-  deleted_at: string;
+  kind: 'deletion' | 'disclosure';
+  at: string;
   entity_count: number;
-  event_count: number;
-  keys_deleted: boolean;
+  event_count: number | null;
+  keys_deleted: boolean | null;
+  client: string | null;
+  token_estimate: number | null;
+  policy_version: string | null;
+  state_version: string | null;
 }
 
 type ModalState =
@@ -114,6 +125,7 @@ export function Settings({ soul, entities, onDataChanged, onGoHome }: SettingsPr
   const [error, setError] = useState<string | null>(null);
   const [success, setSuccess] = useState<string | null>(null);
   const [receipts, setReceipts] = useState<ReceiptSummary[]>([]);
+  const [clients, setClients] = useState<ClientStatus[]>([]);
 
   const loadReceipts = async () => {
     try {
@@ -123,9 +135,63 @@ export function Settings({ soul, entities, onDataChanged, onGoHome }: SettingsPr
     }
   };
 
+  const loadClients = async () => {
+    try {
+      setClients(await invoke<ClientStatus[]>('detect_clients_cmd'));
+    } catch {
+      setClients([]);
+    }
+  };
+
   useEffect(() => {
     void loadReceipts();
+    void loadClients();
   }, []);
+
+  const handleConnect = async (client: string) => {
+    setBusy(`Connecting ${client}...`);
+    setError(null);
+    try {
+      await invoke<null>('connect_client_cmd', { client });
+      setSuccess(`${client} connected to the local MCP server.`);
+      await loadClients();
+    } catch (e) {
+      setError(String(e));
+      await loadClients();
+    } finally {
+      setBusy(null);
+    }
+  };
+
+  const handleDisconnect = async (client: string) => {
+    setBusy(`Disconnecting ${client}...`);
+    setError(null);
+    try {
+      await invoke<null>('disconnect_client_cmd', { client });
+      setSuccess(`${client} disconnected. The config was restored.`);
+      await loadClients();
+    } catch (e) {
+      setError(String(e));
+      await loadClients();
+    } finally {
+      setBusy(null);
+    }
+  };
+
+  const handleRollback = async (client: string) => {
+    setBusy(`Rolling back ${client}...`);
+    setError(null);
+    try {
+      await invoke<null>('rollback_client_cmd', { client });
+      setSuccess(`${client} rolled back to the backup state.`);
+      await loadClients();
+    } catch (e) {
+      setError(String(e));
+      await loadClients();
+    } finally {
+      setBusy(null);
+    }
+  };
 
   const closeModal = () => setModal({ kind: 'none' });
 
@@ -369,6 +435,85 @@ export function Settings({ soul, entities, onDataChanged, onGoHome }: SettingsPr
         </button>
       </Section>
 
+      <Section title="AI clients">
+        <p style={{ fontSize: '13px', color: '#666', margin: '0 0 8px' }}>
+          Connect the local MCP server to a supported coding client. The client config is backed up
+          before any change, and every operation verifies the result.
+        </p>
+        <div style={{ display: 'flex', flexDirection: 'column', gap: '8px' }}>
+          {CLIENT_IDS.map((id) => {
+            const status = clients.find((c) => c.client === id);
+            if (!status) {
+              return (
+                <div
+                  key={id}
+                  style={{
+                    display: 'flex',
+                    justifyContent: 'space-between',
+                    gap: '12px',
+                    alignItems: 'center',
+                    padding: '8px 10px',
+                    border: '1px solid #e5e7eb',
+                    borderRadius: '6px',
+                    fontSize: '13px',
+                  }}
+                >
+                  <span>{id}</span>
+                  <span style={{ color: '#9ca3af' }}>…</span>
+                </div>
+              );
+            }
+            return (
+              <div
+                key={id}
+                style={{
+                  display: 'flex',
+                  flexWrap: 'wrap',
+                  gap: '4px 12px',
+                  alignItems: 'center',
+                  justifyContent: 'space-between',
+                  padding: '8px 10px',
+                  border: '1px solid #e5e7eb',
+                  borderRadius: '6px',
+                  fontSize: '13px',
+                }}
+              >
+                <div style={{ display: 'flex', flexDirection: 'column', gap: '2px' }}>
+                  <div>
+                    <span style={{ fontWeight: 600 }}>{status.label}</span>{' '}
+                    <span style={{ color: '#666' }}>{clientStateLabel(status)}</span>
+                  </div>
+                  <span style={{ fontSize: '12px', color: '#9ca3af', wordBreak: 'break-all' }}>
+                    {clientStatusNote(status)}
+                  </span>
+                </div>
+                <button
+                  onClick={() => handleConnect(id)}
+                  disabled={busy !== null || !status.config_exists || !!status.error}
+                  style={secondaryBtnStyle}
+                >
+                  Connect
+                </button>
+                <button
+                  onClick={() => handleDisconnect(id)}
+                  disabled={busy !== null || !status.connected}
+                  style={secondaryBtnStyle}
+                >
+                  Disconnect
+                </button>
+                <button
+                  onClick={() => handleRollback(id)}
+                  disabled={busy !== null || !status.backup_path}
+                  style={secondaryBtnStyle}
+                >
+                  Rollback
+                </button>
+              </div>
+            );
+          })}
+        </div>
+      </Section>
+
       <Section title="Local receipts">
         <p style={{ fontSize: '13px', color: '#666', margin: '0 0 8px' }}>
           Deletion and disclosure receipts stored on this device. Receipts contain no personal
@@ -392,10 +537,25 @@ export function Settings({ soul, entities, onDataChanged, onGoHome }: SettingsPr
                   color: '#4b5563',
                 }}
               >
-                <span style={{ fontWeight: 600 }}>{new Date(r.deleted_at).toLocaleString()}</span>
-                <span>{r.entity_count} entities removed</span>
-                <span>{r.event_count} events removed</span>
-                <span>keys deleted: {r.keys_deleted ? 'yes' : 'no'}</span>
+                <span style={{ fontWeight: 600 }}>{new Date(r.at).toLocaleString()}</span>
+                {r.kind === 'deletion' ? (
+                  <>
+                    <span>
+                      {r.entity_count} entities removed, {r.event_count ?? 0} events removed
+                    </span>
+                    <span>keys deleted: {r.keys_deleted ? 'yes' : 'no'}</span>
+                  </>
+                ) : (
+                  <>
+                    <span>
+                      context disclosed to <strong>{r.client ?? 'unknown'}</strong> (
+                      {r.entity_count} entities)
+                    </span>
+                    <span>~{r.token_estimate ?? 0} tokens</span>
+                    <span>state {r.state_version ?? '—'}</span>
+                    <span>policy {r.policy_version ?? '—'}</span>
+                  </>
+                )}
                 <span style={{ color: '#9ca3af', wordBreak: 'break-all' }}>{r.file}</span>
               </div>
             ))}

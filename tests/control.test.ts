@@ -61,14 +61,15 @@ describe('buildControlCenter', () => {
     expect(c.next.note).toContain('confirmed');
   });
 
-  it('active soul: connect AI client is the CTA but disabled', () => {
+  it('active soul: connect AI client is the CTA and enabled', () => {
     const c = center({ activated: true, calibrationStep: TOTAL });
     expect(c.state).toBe('active');
     expect(c.statusLabel).toBe('Active');
     expect(c.next).toMatchObject({
       id: 'connect-ai-client',
-      disabled: true,
+      disabled: false,
       label: 'Connect an AI client',
+      target: 'settings',
     });
   });
 

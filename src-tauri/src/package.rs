@@ -117,18 +117,52 @@ pub struct DeletionReceipt {
     pub keys_deleted: bool,
 }
 
+/// Квитанция раскрытия контекста наружу (MCP `soul.get_context`).
+/// Не содержит текста задачи, query, id сущностей, claim или секретов —
+/// только что случилось, когда и сколько.
+#[derive(Debug, Serialize, Deserialize, Clone)]
+pub struct DisclosureReceipt {
+    pub kind: String,
+    pub disclosed_at: String,
+    pub client: String,
+    pub entity_count: i64,
+    pub token_estimate: i64,
+    pub policy_version: String,
+    pub state_version: String,
+    pub max_tokens: i64,
+}
+
 #[derive(Debug, Serialize)]
 pub struct ReceiptSummary {
     pub file: String,
-    pub deleted_at: String,
+    /// "deletion" | "disclosure"
+    pub kind: String,
+    /// Момент события (deleted_at / disclosed_at), RFC3339.
+    pub at: String,
     pub entity_count: i64,
-    pub event_count: i64,
-    pub keys_deleted: bool,
+    pub event_count: Option<i64>,
+    pub keys_deleted: Option<bool>,
+    pub client: Option<String>,
+    pub token_estimate: Option<i64>,
+    pub policy_version: Option<String>,
+    pub state_version: Option<String>,
 }
 
-/// Список локальных квитанций (deletion-*.json) из каталога receipts.
-/// Повреждённые или неожиданные файлы пропускаются — одна битая квитанция
-/// не роняет весь список. Сортировка: свежие первыми.
+/// Атомарная запись квитанции раскрытия в каталог receipts.
+pub fn write_disclosure_receipt(
+    app_dir: &Path,
+    receipt: &DisclosureReceipt,
+) -> Result<(), String> {
+    let receipts_dir = app_dir.join("receipts");
+    fs::create_dir_all(&receipts_dir).map_err(|e| format!("Cannot write receipt: {e}"))?;
+    let path = receipts_dir.join(format!("disclosure-{}.json", Uuid::new_v4()));
+    let json = serde_json::to_string_pretty(receipt).map_err(|e| e.to_string())?;
+    fs::write(&path, json).map_err(|e| format!("Cannot write receipt: {e}"))
+}
+
+/// Список локальных квитанций (deletion-*.json, disclosure-*.json) из каталога
+/// receipts. Повреждённые или неожиданные файлы пропускаются — одна битая
+/// квитанция не роняет весь список. Сортировка: свежие первыми.
 pub fn list_local_receipts(app_dir: &Path) -> Result<Vec<ReceiptSummary>, String> {
     let receipts_dir = app_dir.join("receipts");
     if !receipts_dir.exists() {
@@ -149,22 +183,45 @@ pub fn list_local_receipts(app_dir: &Path) -> Result<Vec<ReceiptSummary>, String
             continue;
         }
         if let Ok(text) = std::fs::read_to_string(&path) {
+            if let Ok(r) = serde_json::from_str::<DisclosureReceipt>(&text) {
+                receipts.push(ReceiptSummary {
+                    file: file_name_of(&path),
+                    kind: "disclosure".to_string(),
+                    at: r.disclosed_at,
+                    entity_count: r.entity_count,
+                    event_count: None,
+                    keys_deleted: None,
+                    client: Some(r.client),
+                    token_estimate: Some(r.token_estimate),
+                    policy_version: Some(r.policy_version),
+                    state_version: Some(r.state_version),
+                });
+                continue;
+            }
             if let Ok(r) = serde_json::from_str::<DeletionReceipt>(&text) {
                 receipts.push(ReceiptSummary {
-                    file: path
-                        .file_name()
-                        .map(|f| f.to_string_lossy().to_string())
-                        .unwrap_or_default(),
-                    deleted_at: r.deleted_at,
+                    file: file_name_of(&path),
+                    kind: "deletion".to_string(),
+                    at: r.deleted_at,
                     entity_count: r.entity_count,
-                    event_count: r.event_count,
-                    keys_deleted: r.keys_deleted,
+                    event_count: Some(r.event_count),
+                    keys_deleted: Some(r.keys_deleted),
+                    client: None,
+                    token_estimate: None,
+                    policy_version: None,
+                    state_version: None,
                 });
             }
         }
     }
-    receipts.sort_by(|a, b| b.deleted_at.cmp(&a.deleted_at));
+    receipts.sort_by(|a, b| b.at.cmp(&a.at));
     Ok(receipts)
+}
+
+fn file_name_of(path: &Path) -> String {
+    path.file_name()
+        .map(|f| f.to_string_lossy().to_string())
+        .unwrap_or_default()
 }
 
 #[derive(Debug)]
@@ -881,8 +938,9 @@ mod tests {
         assert_eq!(receipts.len(), 1);
         let r = &receipts[0];
         assert!(r.file.starts_with("deletion-"));
+        assert_eq!(r.kind, "deletion");
         assert_eq!(r.entity_count, 2);
-        assert!(r.keys_deleted);
+        assert_eq!(r.keys_deleted, Some(true));
     }
 
     #[test]
