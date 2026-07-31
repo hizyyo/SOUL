@@ -214,8 +214,11 @@ function Stat({ label, value }: { label: string; value: number | string }) {
 
 const ctaBtnStyle: React.CSSProperties = {
   padding: '10px 24px',
+  background: '#6366f1',
+  color: '#fff',
   border: 'none',
   borderRadius: '8px',
+  cursor: 'pointer',
   fontWeight: 600,
   fontSize: '15px',
 };

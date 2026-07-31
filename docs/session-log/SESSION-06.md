@@ -55,6 +55,17 @@
 - Список квитанций не обновляется автоматически при возврате на Settings (обновляется при монтировании вкладки — переключение табов перемонтирует страницу).
 - Disclosure-квитанции (раскрытие контекста при подключённом AI) появятся в SESSION-08+; сейчас показываются только квитанции удаления.
 
+## Повторная проверка и исправленные баги (review-pass)
+
+По результатам аудита сессии (полный прогон проверок + ручной код-ревью по правилам universal/typescript/rust) исправлено:
+
+- **Баг (визуальный): кнопка «Create SOUL» потеряла цвета.** При выносе общих стилей в `ctaBtnStyle` из него упали `background`/`color`/`cursor`, а кнопка создания их не переопределяла — стала системной серой. Вернул базовые значения в `ctaBtnStyle`.
+- **UX-пробел: активированный SOUL с незавершённой калибровкой (достижимо через импорт пакета с `activated=true`) не имел пути «продолжить калибровку».** Добавлено вторичное действие `continue-calibration` для `activated && !calibrationDone` (+2 теста).
+- **DoS-защита: `list_local_receipts` читал файлы квитанций без лимита размера.** Файлы > 1 МБ пропускаются (тест `list_receipts_skips_oversized_files` — валидная квитанция с паддингом 1.1 МБ не попадает в список).
+- **Floating promise** в `Settings.loadReceipts` — явный `void`.
+
+Проверки после фиксов: `cargo test` 54/54, clippy чисто, `pnpm test` 71/71, typecheck/lint/prettier/build — PASS.
+
 ## Последующие сессии
 
 - По плану: SESSION-07 — поиск и компилятор контекста (FTS, фильтры области/чувствительности/состояния/времени, границы выше предпочтений).
@@ -62,3 +73,4 @@
 ## Коммит
 
 - `923c95f` — `feat(soul): control center with single next-step CTA and local receipt viewer [session-06]`
+- `5bca735` — `fix(soul): review-pass fixes - create CTA styling, calibration path for active soul, receipt size guard [session-06]`

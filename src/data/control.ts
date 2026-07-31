@@ -91,6 +91,15 @@ export function buildControlCenter(input: {
   }
 
   const secondary: ActionItem[] = [];
+  if (input.activated && !calibrationDone) {
+    secondary.push({
+      id: 'continue-calibration',
+      label: `Continue Calibration (step ${Math.min(step + 1, total)} of ${total})`,
+      target: 'calibration',
+      disabled: false,
+      note: 'Calibration is not finished. Your progress is saved on this device.',
+    });
+  }
   if (input.candidateCount > 0) {
     secondary.push({
       id: 'review-candidates',

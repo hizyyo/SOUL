@@ -142,6 +142,12 @@ pub fn list_local_receipts(app_dir: &Path) -> Result<Vec<ReceiptSummary>, String
         if path.extension().and_then(|e| e.to_str()) != Some("json") {
             continue;
         }
+        let size = std::fs::metadata(&path)
+            .map(|m| m.len())
+            .unwrap_or_default();
+        if size > 1_000_000 {
+            continue;
+        }
         if let Ok(text) = std::fs::read_to_string(&path) {
             if let Ok(r) = serde_json::from_str::<DeletionReceipt>(&text) {
                 receipts.push(ReceiptSummary {
@@ -897,6 +903,20 @@ mod tests {
         assert_eq!(receipts.len(), 2);
         assert_eq!(receipts[0].file, "deletion-new.json");
         assert_eq!(receipts[1].file, "deletion-old.json");
+    }
+
+    #[test]
+    fn list_receipts_skips_oversized_files() {
+        let env = TestEnv::new();
+        let receipts_dir = env.dir.join("receipts");
+        std::fs::create_dir_all(&receipts_dir).unwrap();
+        let mut body = String::new();
+        body.push_str(
+            r#"{"deleted_at":"2026-01-01T00:00:00Z","entity_count":1,"event_count":1,"keys_deleted":true}"#,
+        );
+        body.push_str(&" ".repeat(1_100_000));
+        std::fs::write(receipts_dir.join("deletion-big.json"), body).unwrap();
+        assert!(list_local_receipts(&env.dir).unwrap().is_empty());
     }
 
     #[test]

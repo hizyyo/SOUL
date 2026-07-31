@@ -72,6 +72,19 @@ describe('buildControlCenter', () => {
     });
   });
 
+  it('active soul with unfinished calibration keeps continue-calibration secondary', () => {
+    const c = center({ activated: true, calibrationStep: 2 });
+    expect(c.state).toBe('active');
+    const item = c.secondary.find((a) => a.id === 'continue-calibration');
+    expect(item).toMatchObject({ disabled: false, target: 'calibration' });
+    expect(item!.label).toContain('step 3 of 5');
+  });
+
+  it('active soul with finished calibration has no continue-calibration secondary', () => {
+    const c = center({ activated: true, calibrationStep: TOTAL });
+    expect(c.secondary.map((a) => a.id)).not.toContain('continue-calibration');
+  });
+
   it('exactly one primary CTA exists in every state', () => {
     const states = [
       center({ hasSoul: false }),

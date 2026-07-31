@@ -124,7 +124,7 @@ export function Settings({ soul, entities, onDataChanged, onGoHome }: SettingsPr
   };
 
   useEffect(() => {
-    loadReceipts();
+    void loadReceipts();
   }, []);
 
   const closeModal = () => setModal({ kind: 'none' });
