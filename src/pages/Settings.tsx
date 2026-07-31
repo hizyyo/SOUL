@@ -249,7 +249,14 @@ export function Settings({ soul, entities, onDataChanged, onGoHome }: SettingsPr
       <p style={{ color: '#666' }}>Status, backup, restore and data deletion.</p>
 
       {error && (
-        <div style={errorStyle}>
+        <div
+          style={{
+            ...errorStyle,
+            ...(modal.kind !== 'none'
+              ? { position: 'fixed', top: '16px', left: '50%', transform: 'translateX(-50%)', zIndex: 200, maxWidth: 'min(560px, 90vw)' }
+              : {}),
+          }}
+        >
           {error}
           <button onClick={() => setError(null)} style={dismissBtnStyle}>x</button>
         </div>
