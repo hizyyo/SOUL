@@ -1,10 +1,13 @@
+mod crypto;
 mod db;
+mod package;
 
 use db::{
     init_db, create_soul, add_entity, list_entities, get_soul, list_souls,
     get_calibration, save_calibration, activate_soul, is_soul_activated,
     update_entity,
 };
+use package::{ExportReceipt, ImportPreview, DeletionReceipt, JsonExportReceipt, MarkdownExportReceipt};
 use serde::{Deserialize, Serialize};
 use std::sync::Mutex;
 use tauri::Manager;
@@ -202,10 +205,71 @@ fn list_souls_internal(state: &AppState) -> Result<Vec<db::SoulManifest>, String
     list_souls(&conn).map_err(|e| e.to_string())
 }
 
+#[tauri::command]
+fn export_soul_cmd(
+    state: tauri::State<AppState>,
+    app: tauri::AppHandle,
+    soul_id: String,
+    password: String,
+    path: String,
+) -> Result<ExportReceipt, String> {
+    let conn = state.conn.lock().map_err(|e| e.to_string())?;
+    let app_dir = app.path().app_data_dir().map_err(|e| e.to_string())?;
+    package::export_package(&conn, &app_dir, &soul_id, &password, std::path::Path::new(&path))
+}
+
+#[tauri::command]
+fn inspect_soul_file_cmd(path: String, password: String) -> Result<ImportPreview, String> {
+    package::inspect_package_file(std::path::Path::new(&path), &password)
+}
+
+#[tauri::command]
+fn import_soul_file_cmd(
+    state: tauri::State<AppState>,
+    path: String,
+    password: String,
+) -> Result<SoulInfo, String> {
+    let mut conn = state.conn.lock().map_err(|e| e.to_string())?;
+    let manifest = package::import_package_file(&mut conn, std::path::Path::new(&path), &password)?;
+    Ok(soul_to_info(&conn, &manifest))
+}
+
+#[tauri::command]
+fn export_soul_json_cmd(
+    state: tauri::State<AppState>,
+    soul_id: String,
+    path: String,
+) -> Result<JsonExportReceipt, String> {
+    let conn = state.conn.lock().map_err(|e| e.to_string())?;
+    package::export_json(&conn, &soul_id, std::path::Path::new(&path))
+}
+
+#[tauri::command]
+fn export_soul_markdown_cmd(
+    state: tauri::State<AppState>,
+    soul_id: String,
+    path: String,
+) -> Result<MarkdownExportReceipt, String> {
+    let conn = state.conn.lock().map_err(|e| e.to_string())?;
+    package::export_markdown(&conn, &soul_id, std::path::Path::new(&path))
+}
+
+#[tauri::command]
+fn delete_soul_cmd(
+    state: tauri::State<AppState>,
+    app: tauri::AppHandle,
+    soul_id: String,
+) -> Result<DeletionReceipt, String> {
+    let conn = state.conn.lock().map_err(|e| e.to_string())?;
+    let app_dir = app.path().app_data_dir().map_err(|e| e.to_string())?;
+    package::wipe_local_data(&conn, &app_dir, &soul_id)
+}
+
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     tauri::Builder::default()
         .plugin(tauri_plugin_shell::init())
+        .plugin(tauri_plugin_dialog::init())
         .manage(AppState {
             conn: Mutex::new(
                 init_db(&std::path::PathBuf::from("."))
@@ -223,6 +287,12 @@ pub fn run() {
             get_calibration_cmd,
             save_calibration_cmd,
             activate_soul_cmd,
+            export_soul_cmd,
+            inspect_soul_file_cmd,
+            import_soul_file_cmd,
+            export_soul_json_cmd,
+            export_soul_markdown_cmd,
+            delete_soul_cmd,
         ])
         .setup(|app| {
             let app_dir = app.path().app_data_dir().expect("Failed to get app data dir");

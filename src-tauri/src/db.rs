@@ -110,10 +110,51 @@ pub fn init_db(app_dir: &std::path::Path) -> SqlResult<Connection> {
     Ok(conn)
 }
 
-fn compute_hash(data: &str) -> String {
+pub fn compute_hash(data: &str) -> String {
     let mut hasher = Sha256::new();
     hasher.update(data.as_bytes());
     hex::encode(hasher.finalize())
+}
+
+pub fn count_soul(conn: &Connection, soul_id: &str) -> SqlResult<(i64, i64)> {
+    let entities: i64 = conn.query_row(
+        "SELECT COUNT(*) FROM entities WHERE soul_id = ?1",
+        params![soul_id],
+        |row| row.get(0),
+    )?;
+    let events: i64 = conn.query_row(
+        "SELECT COUNT(*) FROM events WHERE soul_id = ?1",
+        params![soul_id],
+        |row| row.get(0),
+    )?;
+    Ok((entities, events))
+}
+
+pub fn get_soul_state(conn: &Connection, soul_id: &str) -> SqlResult<(i32, String, bool)> {
+    let mut stmt = conn.prepare(
+        "SELECT calibration_step, calibration_answers, activated FROM soul_state WHERE soul_id = ?1",
+    )?;
+    let mut rows = stmt.query_map(params![soul_id], |row| {
+        Ok((row.get::<_, i32>(0)?, row.get::<_, String>(1)?, row.get::<_, i32>(2)? != 0))
+    })?;
+    match rows.next() {
+        Some(row) => Ok(row?),
+        None => Ok((0, "[]".to_string(), false)),
+    }
+}
+
+pub fn wipe_all(conn: &Connection) -> SqlResult<()> {
+    conn.execute_batch("PRAGMA secure_delete=ON;")?;
+    conn.execute_batch("PRAGMA wal_checkpoint(TRUNCATE);")?;
+    conn.execute_batch(
+        "DELETE FROM entities;
+         DELETE FROM events;
+         DELETE FROM soul_state;
+         DELETE FROM souls;",
+    )?;
+    conn.execute_batch("PRAGMA wal_checkpoint(TRUNCATE);")?;
+    conn.execute_batch("VACUUM;")?;
+    Ok(())
 }
 
 pub fn get_calibration(conn: &Connection, soul_id: &str) -> SqlResult<(i32, String)> {

@@ -250,7 +250,12 @@ export function App() {
       ) : tab === 'context' ? (
         <ContextPage />
       ) : (
-        <Settings />
+        <Settings
+          soul={soul}
+          entities={entities}
+          onDataChanged={loadData}
+          onGoHome={() => setTab('home')}
+        />
       )}
     </div>
   );
