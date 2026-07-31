@@ -365,7 +365,7 @@ function toContextItem(entity: ContextEntity, queryText: string): ContextItem {
     id: entity.id,
     entityType: entity.entity_type,
     status: entity.status,
-    claim: typeof data.claim === 'string' ? data.claim : entity.data,
+    claim: typeof data.claim === 'string' ? data.claim : '',
     evidence: typeof data.evidence === 'string' ? data.evidence : '',
     sensitivity: sensitivityOf(entity),
     domains: domainsOf(entity),
@@ -386,7 +386,10 @@ function formatTokens(value: number): string {
  * (relevance == 0 не попадает в пак); бюджет никогда не превышается.
  */
 export function compileContext(entities: ContextEntity[], query: ContextQuery): ContextPack {
-  const maxTokens = Math.max(1, Math.min(CONTEXT_HARD_MAX_TOKENS, Math.floor(query.maxTokens)));
+  const raw = Math.floor(query.maxTokens);
+  const maxTokens = Number.isFinite(raw)
+    ? Math.max(1, Math.min(CONTEXT_HARD_MAX_TOKENS, raw))
+    : CONTEXT_STANDARD_TOKENS;
   const allowedSensitivity =
     query.sensitivity.length > 0 ? query.sensitivity : [...DEFAULT_ALLOWED_SENSITIVITY];
   const allowedStatuses =
@@ -395,8 +398,11 @@ export function compileContext(entities: ContextEntity[], query: ContextQuery): 
 
   // Конфликты считаются по сырым данным: повторные ответы на один вопрос с
   // другим значением дают пару (старое значение → новое) ещё до дедупликации.
-  const conflicts = detectConflicts(entities);
+  const conflicts = detectConflicts(entities).sort((x, y) =>
+    `${x.a}|${x.b}`.localeCompare(`${y.a}|${y.b}`),
+  );
   const { kept, supersededIds } = dedupeSuperseded(entities);
+  supersededIds.sort((a, b) => a.localeCompare(b));
 
   const eligible = kept.filter((entity) => {
     if (!allowedStatuses.includes(entity.status)) return false;
@@ -414,8 +420,10 @@ export function compileContext(entities: ContextEntity[], query: ContextQuery): 
 
   const items = eligible.map((e) => toContextItem(e, queryText)).sort(compareItems);
 
-  // Упаковка: добавляем в порядке приоритета, пока оценка сериализованного
-  // пакета не превысит бюджет. Пустые пакеты остаются пустыми.
+  // Упаковка: добавляем в порядке приоритета, пока оценка ПОЛНОГО пакета
+  // (заголовок + тело + отчёт о конфликтах/superseded) не превысит бюджет.
+  // stateVersion — 8 hex-символов, размер не зависит от значения, поэтому
+  // в пробной оценке используется заглушка.
   const packed: ContextItem[] = [];
   const candidateTexts: string[] = [];
   for (const item of items) {
@@ -425,45 +433,59 @@ export function compileContext(entities: ContextEntity[], query: ContextQuery): 
     lines.push(item.claim);
     if (item.evidence && item.evidence !== item.claim) lines.push(`evidence: ${item.evidence}`);
     const text = lines.join('\n');
-    const trial = serializePackBody(candidateTexts, text);
+    const trialBody = [...candidateTexts, text].join('\n');
+    const trial = serializePackBodyParts(
+      trialBody,
+      conflicts,
+      supersededIds,
+      '00000000',
+      candidateTexts.length + 1,
+      maxTokens,
+    );
     if (estimateTokens(trial) <= maxTokens) {
       packed.push(item);
       candidateTexts.push(text);
     }
   }
 
-  const stateSource = packed
-    .map((i) => `${i.id}|${i.updatedAt}`)
-    .sort((a, b) => a.localeCompare(b))
-    .join('\n');
-  const stateVersion = hashString(stateSource);
+  // Финальная сборка: версия состояния по включённым сущностям; токены в
+  // заголовке — оценка реального сериализованного текста (не заглушки).
+  const finalize = (count: number) => {
+    const selected = packed.slice(0, count);
+    const body = candidateTexts.slice(0, count).join('\n');
+    const stateSource = selected
+      .map((i) => `${i.id}|${i.updatedAt}`)
+      .sort((a, b) => a.localeCompare(b))
+      .join('\n');
+    const stateVersion = hashString(stateSource);
+    const draft = serializePackBodyParts(
+      body,
+      conflicts,
+      supersededIds,
+      stateVersion,
+      selected.length,
+      maxTokens,
+    );
+    const tokenEstimate = estimateTokens(draft);
+    const serialized = draft.replace('tokens: X of', `tokens: ${formatTokens(tokenEstimate)} of`);
+    return { items: selected, stateVersion, tokenEstimate: estimateTokens(serialized), serialized };
+  };
 
-  const body = candidateTexts.join('\n');
-  const draft = serializePackBodyParts(
-    body,
-    conflicts,
-    supersededIds,
-    stateVersion,
-    packed.length,
-    maxTokens,
-  );
-  const tokenEstimate = estimateTokens(draft);
-  const serialized = draft.replace('tokens: X of', `tokens: ${formatTokens(tokenEstimate)} of`);
+  // Страховка: замена 'X' на число добавляет до пары символов — если оценка
+  // финального текста всё же превысила бюджет, сбрасываем самый низкоприоритетный
+  // элемент и пересобираем. Детерминированно, максимум пара итераций.
+  let final = finalize(packed.length);
+  while (final.tokenEstimate > maxTokens && final.items.length > 0) {
+    final = finalize(final.items.length - 1);
+  }
 
   return {
-    items: packed,
+    ...final,
     conflicts,
     supersededIds,
     policyVersion: CONTEXT_POLICY_VERSION,
-    stateVersion,
     maxTokens,
-    tokenEstimate,
-    serialized,
   };
-}
-
-function serializePackBody(candidateTexts: string[], candidate: string): string {
-  return [...candidateTexts, candidate].join('\n');
 }
 
 function serializePackBodyParts(

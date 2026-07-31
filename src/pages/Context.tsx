@@ -112,12 +112,14 @@ export function ContextPage({ soul, entities }: { soul: SoulInfo | null; entitie
   const [statuses, setStatuses] = useState<string[]>([]);
   const [maxTokens, setMaxTokens] = useState(CONTEXT_STANDARD_TOKENS);
   const timerRef = useRef<number | null>(null);
+  const requestSeqRef = useRef(0);
 
   const allDomains = useMemo(() => collectDomains(entities), [entities]);
 
   useEffect(() => {
     if (timerRef.current !== null) window.clearTimeout(timerRef.current);
     const text = search.trim();
+    const seq = ++requestSeqRef.current;
     if (!soul || !text) {
       setHits([]);
       setSearching(false);
@@ -130,9 +132,15 @@ export function ContextPage({ soul, entities }: { soul: SoulInfo | null; entitie
         query: text,
         limit: 20,
       })
-        .then(setHits)
-        .catch(() => setHits([]))
-        .finally(() => setSearching(false));
+        .then((res) => {
+          if (requestSeqRef.current === seq) setHits(res);
+        })
+        .catch(() => {
+          if (requestSeqRef.current === seq) setHits([]);
+        })
+        .finally(() => {
+          if (requestSeqRef.current === seq) setSearching(false);
+        });
     }, 250);
     return () => {
       if (timerRef.current !== null) window.clearTimeout(timerRef.current);
@@ -246,6 +254,9 @@ export function ContextPage({ soul, entities }: { soul: SoulInfo | null; entitie
             {s}
           </Chip>
         ))}
+        {sensitivity.length === 0 && (
+          <span style={{ fontSize: '11px', color: '#9ca3af' }}>default: all except restricted</span>
+        )}
       </div>
 
       <div style={{ marginBottom: '8px' }}>
@@ -259,6 +270,9 @@ export function ContextPage({ soul, entities }: { soul: SoulInfo | null; entitie
             {s}
           </Chip>
         ))}
+        {statuses.length === 0 && (
+          <span style={{ fontSize: '11px', color: '#9ca3af' }}>default: active only</span>
+        )}
       </div>
 
       <div style={{ marginBottom: '12px', display: 'flex', alignItems: 'center', gap: '8px' }}>

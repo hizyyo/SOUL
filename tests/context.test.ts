@@ -256,6 +256,30 @@ describe('budget packing', () => {
     expect(tiny.maxTokens).toBe(1);
   });
 
+  it('handles non-finite budget gracefully', () => {
+    const pack = compileContext([longEntity(1)], query({ maxTokens: NaN }));
+    expect(pack.maxTokens).toBe(CONTEXT_STANDARD_TOKENS);
+    expect(pack.items).toHaveLength(1);
+    expect(pack.tokenEstimate).toBeLessThanOrEqual(CONTEXT_STANDARD_TOKENS);
+  });
+
+  it('counts header, conflicts and superseded report toward the budget', () => {
+    const oldAnswer = entityData(dataFor({ questionId: 'pref_boundary', value: 'fast' }), {
+      updated_at: '2026-06-01T00:00:00Z',
+    });
+    const newAnswer = entityData(dataFor({ questionId: 'pref_boundary', value: 'slow' }), {
+      updated_at: '2026-07-01T00:00:00Z',
+    });
+    const others = Array.from({ length: 10 }, (_, i) =>
+      entityData(dataFor({ claim: `Padding ${'pad '.repeat(30)}${i}`, questionId: `pref_extra_${i}` })),
+    );
+    const pack = compileContext([oldAnswer, newAnswer, ...others], query({ maxTokens: 250 }));
+    expect(pack.conflicts).toHaveLength(1);
+    expect(pack.supersededIds).toContain(oldAnswer.id);
+    expect(pack.serialized).toContain('CONFLICTS:');
+    expect(pack.tokenEstimate).toBeLessThanOrEqual(pack.maxTokens);
+  });
+
   it('empty pack stays empty but still serialized', () => {
     const pack = compileContext([], query({}));
     expect(pack.items).toHaveLength(0);
@@ -284,6 +308,24 @@ describe('determinism and stability', () => {
     const changed = entityData(dataFor({ claim: 'Totally different claim text' }));
     const b = compileContext([changed], query({}));
     expect(b.stateVersion).not.toBe(a.stateVersion);
+  });
+
+  it('same state in any input order produces the same pack', () => {
+    const oldA = entityData(dataFor({ questionId: 'pref_order', value: 'x', claim: 'First claim' }), {
+      updated_at: '2026-06-01T00:00:00Z',
+    });
+    const newA = entityData(dataFor({ questionId: 'pref_order', value: 'y', claim: 'Second claim' }), {
+      updated_at: '2026-07-01T00:00:00Z',
+    });
+    const extra = entity({ entity_type: 'boundary' });
+    const forward = [oldA, newA, extra];
+    const backward = [...forward].reverse();
+    const a = compileContext(forward, query({}));
+    const b = compileContext(backward, query({}));
+    expect(b.serialized).toBe(a.serialized);
+    expect(b.conflicts).toEqual(a.conflicts);
+    expect(b.supersededIds).toEqual(a.supersededIds);
+    expect(b.stateVersion).toBe(a.stateVersion);
   });
 
   it('repeated compilation is far under the 75ms p95 budget', () => {
