@@ -45,7 +45,7 @@ pub fn ensure_device_keypair(app_dir: &Path) -> Result<DeviceKeys, String> {
             return Err("Device key files are corrupted (wrong length).".into());
         }
         return Ok(DeviceKeys {
-            public_b64: B64.encode(&public),
+            public_b64: B64.encode(public),
             private_bytes: secret.try_into().map_err(|_| "Corrupted device key.".to_string())?,
         });
     }
@@ -58,7 +58,7 @@ pub fn ensure_device_keypair(app_dir: &Path) -> Result<DeviceKeys, String> {
     write_key_file(&public_path, &public)?;
 
     Ok(DeviceKeys {
-        public_b64: B64.encode(&public),
+        public_b64: B64.encode(public),
         private_bytes: secret,
     })
 }
@@ -95,13 +95,20 @@ fn derive_key(password: &str, salt: &[u8], mem_kib: u32, time: u32, p: u32) -> R
     Ok(key)
 }
 
+#[derive(Debug, Clone)]
+pub struct SealedBox {
+    pub ciphertext: Vec<u8>,
+    pub salt: [u8; SALT_LEN],
+    pub nonce: [u8; NONCE_LEN],
+}
+
 pub fn encrypt_payload(
     plaintext: &[u8],
     password: &str,
     mem_kib: u32,
     time: u32,
     p: u32,
-) -> Result<(Vec<u8>, [u8; SALT_LEN], [u8; NONCE_LEN]), String> {
+) -> Result<SealedBox, String> {
     let mut salt = [0u8; SALT_LEN];
     let mut nonce = [0u8; NONCE_LEN];
     OsRng.fill_bytes(&mut salt);
@@ -112,7 +119,7 @@ pub fn encrypt_payload(
     let ciphertext = cipher
         .encrypt(XNonce::from_slice(&nonce), plaintext)
         .map_err(|_| "Encryption failed.".to_string())?;
-    Ok((ciphertext, salt, nonce))
+    Ok(SealedBox { ciphertext, salt, nonce })
 }
 
 pub fn decrypt_payload(

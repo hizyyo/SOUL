@@ -165,7 +165,7 @@ pub fn export_package_with_params(
     let plaintext = serde_json::to_vec(&payload).map_err(|e| format!("Serialize failed: {e}"))?;
 
     let (mem_kib, time, p) = kdf.unwrap_or_else(crypto::default_kdf_params);
-    let (ciphertext, salt, nonce) = crypto::encrypt_payload(&plaintext, password, mem_kib, time, p)?;
+    let sealed = crypto::encrypt_payload(&plaintext, password, mem_kib, time, p)?;
 
     let content_hash = crypto::sha256_hex(&plaintext);
     let keys = crypto::ensure_device_keypair(app_dir)?;
@@ -183,19 +183,19 @@ pub fn export_package_with_params(
         cipher: CipherParams {
             name: "xchacha20-poly1305".to_string(),
             kdf: "argon2id".to_string(),
-            salt: B64.encode(salt),
-            nonce: B64.encode(nonce),
+            salt: B64.encode(sealed.salt),
+            nonce: B64.encode(sealed.nonce),
             mem_cost_kib: mem_kib,
             time_cost: time,
             parallelism: p,
         },
-        payload_ciphertext: B64.encode(&ciphertext),
+        payload_ciphertext: B64.encode(&sealed.ciphertext),
         signature: None,
     };
 
     let canonical = serde_json::to_vec(&envelope).map_err(|e| format!("Serialize failed: {e}"))?;
     let mut to_sign = sha256_bytes(&canonical).to_vec();
-    to_sign.extend_from_slice(&ciphertext);
+    to_sign.extend_from_slice(&sealed.ciphertext);
     let signature = crypto::sign_bytes(&keys.private_bytes, &to_sign);
     envelope.signature = Some(B64.encode(signature));
 
