@@ -6,17 +6,17 @@ Personal Intelligence Runtime.
 
 ## Текущая область P0
 
-- Создание локального SOUL
-- Интерактивная калибровка (5 минут)
-- Типизированные сущности (preference, decision, boundary, goal, fact)
-- Локальный SQLite + FTS5
-- Компилятор контекста
-- MCP-адаптер для coding-клиентов
-- Browser Companion для ChatGPT/Gemini/Claude Web
-- Blind Preference Test (20 раундов)
-- Детерминированный DSL политик
-- Имитированный Gateway
-- Экспорт и удаление
+- Создание локального SOUL — готово (SESSION-01)
+- Интерактивная калибровка (5 минут) — готово (SESSION-02)
+- Типизированные сущности (preference, decision, boundary, goal, fact) — готово (SESSION-01/02)
+- Локальный SQLite + FTS5 — готово (SESSION-01/07)
+- Компилятор контекста — готово (SESSION-07)
+- MCP-адаптер для coding-клиентов — готово (SESSION-08)
+- Browser Companion для ChatGPT/Gemini/Claude Web — готово (SESSION-09)
+- Blind Preference Test (20 раундов) — готово (SESSION-10)
+- Детерминированный DSL политик — в плане
+- Имитированный Gateway — в плане
+- Экспорт и удаление — готово (SESSION-03/06)
 
 ## Локальная настройка
 

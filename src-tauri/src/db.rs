@@ -123,6 +123,8 @@ pub fn init_db(app_dir: &std::path::Path) -> SqlResult<Connection> {
 
     init_fts(&conn)?;
 
+    crate::eval::init_evaluations(&conn)?;
+
     Ok(conn)
 }
 

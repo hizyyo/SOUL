@@ -1,5 +1,6 @@
 mod crypto;
 mod db;
+mod eval;
 mod integrations;
 mod package;
 mod context;
@@ -398,6 +399,63 @@ fn bridge_status_cmd(app: tauri::AppHandle) -> Result<native_host::BridgeStatus,
     Ok(native_host::bridge_status(&app_dir))
 }
 
+#[tauri::command]
+#[allow(clippy::too_many_arguments)] // параметры = поля EvaluationRow, дублируются из eval::create_evaluation
+fn create_evaluation_cmd(
+    state: tauri::State<AppState>,
+    soul_id: String,
+    scenario_id: String,
+    scenario_text: String,
+    domain: String,
+    soul_answer: String,
+    baseline_answer: String,
+    baseline_profile: String,
+    context_pack: String,
+    context_entity_ids: Vec<String>,
+) -> Result<eval::EvaluationRow, String> {
+    let conn = state.conn.lock().map_err(|e| e.to_string())?;
+    eval::create_evaluation(
+        &conn,
+        &soul_id,
+        &scenario_id,
+        &scenario_text,
+        &domain,
+        &soul_answer,
+        &baseline_answer,
+        &baseline_profile,
+        &context_pack,
+        &context_entity_ids,
+    )
+}
+
+#[tauri::command]
+fn submit_evaluation_choice_cmd(
+    state: tauri::State<AppState>,
+    evaluation_id: String,
+    choice: String,
+) -> Result<eval::EvaluationRow, String> {
+    let conn = state.conn.lock().map_err(|e| e.to_string())?;
+    eval::submit_choice(&conn, &evaluation_id, &choice)
+}
+
+#[tauri::command]
+fn list_evaluations_cmd(
+    state: tauri::State<AppState>,
+    soul_id: String,
+) -> Result<Vec<eval::EvaluationRow>, String> {
+    let conn = state.conn.lock().map_err(|e| e.to_string())?;
+    eval::list_evaluations(&conn, &soul_id)
+}
+
+#[tauri::command]
+fn delete_evaluation_cmd(
+    state: tauri::State<AppState>,
+    evaluation_id: String,
+) -> Result<(), String> {
+    let conn = state.conn.lock().map_err(|e| e.to_string())?;
+    eval::delete_evaluation(&conn, &evaluation_id)
+}
+
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     tauri::Builder::default()
@@ -438,6 +496,10 @@ pub fn run() {
             register_bridge_cmd,
             unregister_bridge_cmd,
             bridge_status_cmd,
+            create_evaluation_cmd,
+            submit_evaluation_choice_cmd,
+            list_evaluations_cmd,
+            delete_evaluation_cmd,
         ])
         .setup(|app| {
             let app_dir = app.path().app_data_dir().expect("Failed to get app data dir");

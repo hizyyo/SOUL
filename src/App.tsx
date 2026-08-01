@@ -457,7 +457,7 @@ export function App() {
           busyId={busyEntityId}
         />
       ) : tab === 'tests' ? (
-        <Tests />
+        <Tests soul={soul} entities={entities} />
       ) : tab === 'context' ? (
         <ContextPage soul={soul} entities={entities} />
       ) : (

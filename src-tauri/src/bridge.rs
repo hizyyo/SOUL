@@ -284,7 +284,7 @@ fn handle_get_context(
     let max_tokens = match msg.get("maxTokens") {
         None | Some(Value::Null) => None,
         Some(Value::Number(n)) => match n.as_u64() {
-            Some(v) if (1..=context::CONTEXT_HARD_MAX_TOKENS as u64).contains(&v) => {
+            Some(v) if (1..=context::CONTEXT_HARD_MAX_TOKENS).contains(&v) => {
                 Some(v as f64)
             }
             _ => {
