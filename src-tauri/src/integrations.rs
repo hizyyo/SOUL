@@ -182,10 +182,7 @@ fn soul_command_json(config: &str) -> Result<Option<String>, String> {
 fn soul_command_toml(config: &str) -> Result<Option<String>, String> {
     let value: toml::Value =
         toml::from_str(config).map_err(|e| format!("config is not valid TOML: {e}"))?;
-    let Some(soul) = value
-        .get("mcp_servers")
-        .and_then(|s| s.get("soul"))
-    else {
+    let Some(soul) = value.get("mcp_servers").and_then(|s| s.get("soul")) else {
         return Ok(None);
     };
     Ok(soul
@@ -325,7 +322,10 @@ fn write_state(app_dir: &Path, state: &IntegrationState) -> Result<(), String> {
         .parse::<ClientId>()
         .map_err(|e| format!("Cannot persist integration state: {e}"))?;
     let path = state_path(app_dir, client);
-    atomic_write(&path, &serde_json::to_string_pretty(state).map_err(|e| e.to_string())?)
+    atomic_write(
+        &path,
+        &serde_json::to_string_pretty(state).map_err(|e| e.to_string())?,
+    )
 }
 
 fn remove_state(app_dir: &Path, client: ClientId) {
@@ -363,7 +363,16 @@ pub fn detect_clients(app_dir: &Path, binary: &Path) -> Vec<ClientStatus> {
     let Some(home) = home_dir() else {
         return ClientId::all()
             .iter()
-            .map(|c| build_status(*c, &PathBuf::new(), binary, false, Some("Home directory not found".into()), None))
+            .map(|c| {
+                build_status(
+                    *c,
+                    &PathBuf::new(),
+                    binary,
+                    false,
+                    Some("Home directory not found".into()),
+                    None,
+                )
+            })
             .collect();
     };
     detect_clients_for(&home, app_dir, binary)
@@ -476,7 +485,8 @@ pub fn connect_client_for(
     atomic_write(&config_path, &modified)?;
 
     // Проверка результата: запись реально применилась.
-    let read_back = std::fs::read_to_string(&config_path).map_err(|e| format!("Cannot verify config: {e}"))?;
+    let read_back =
+        std::fs::read_to_string(&config_path).map_err(|e| format!("Cannot verify config: {e}"))?;
     let rollback_connect = || {
         if original.is_empty() {
             // Файла до подключения не было — не оставляем пустышку.
@@ -514,7 +524,9 @@ pub fn connect_client_for(
     if let Err(e) = write_state(app_dir, &state) {
         rollback_connect();
         let _ = std::fs::remove_file(&backup_path);
-        return Err(format!("Cannot persist integration state; config rolled back: {e}"));
+        return Err(format!(
+            "Cannot persist integration state; config rolled back: {e}"
+        ));
     }
 
     Ok(detect_client(app_dir, binary, client, home))
@@ -716,7 +728,14 @@ mod tests {
         assert!(!connected(&env, ClientId::ClaudeCode));
         assert!(!connected(&env, ClientId::Codex));
         assert!(!connected(&env, ClientId::Cursor));
-        assert_eq!(status(&env, ClientId::Cursor).config_path, env.home.join(".cursor").join("mcp.json").to_string_lossy().to_string());
+        assert_eq!(
+            status(&env, ClientId::Cursor).config_path,
+            env.home
+                .join(".cursor")
+                .join("mcp.json")
+                .to_string_lossy()
+                .to_string()
+        );
     }
 
     #[test]
@@ -729,7 +748,10 @@ mod tests {
         let text = fs::read_to_string(client_config_path(ClientId::ClaudeCode, &env.home)).unwrap();
         let v: serde_json::Value = serde_json::from_str(&text).unwrap();
         assert_eq!(v["mcpServers"]["soul"]["command"], binary_str(&env));
-        assert_eq!(v["mcpServers"]["other"]["command"], "x", "чужая запись сохраняется");
+        assert_eq!(
+            v["mcpServers"]["other"]["command"], "x",
+            "чужая запись сохраняется"
+        );
 
         // backup существует и содержит исходный файл.
         let backup = fs::read_to_string(s.backup_path.unwrap()).unwrap();
@@ -743,7 +765,10 @@ mod tests {
     #[test]
     fn connect_is_idempotent_and_refuses_foreign_soul_entry() {
         let env = TestEnv::new();
-        json_cfg(&env, r#"{ "mcpServers": { "soul": { "command": "C:\\other\\soul-mcp.exe" } } }"#);
+        json_cfg(
+            &env,
+            r#"{ "mcpServers": { "soul": { "command": "C:\\other\\soul-mcp.exe" } } }"#,
+        );
         let err = connect(&env, ClientId::ClaudeCode).unwrap_err();
         assert!(err.contains("different command"), "unexpected error: {err}");
 
@@ -756,7 +781,8 @@ mod tests {
         connect(&env2, ClientId::ClaudeCode).unwrap();
         // Повторный connect — без ошибок и без дублей.
         connect(&env2, ClientId::ClaudeCode).unwrap();
-        let text = fs::read_to_string(client_config_path(ClientId::ClaudeCode, &env2.home)).unwrap();
+        let text =
+            fs::read_to_string(client_config_path(ClientId::ClaudeCode, &env2.home)).unwrap();
         assert_eq!(text.matches("\"soul\"").count(), 1);
     }
 
@@ -766,8 +792,7 @@ mod tests {
         connect(&env, ClientId::ClaudeCode).unwrap();
         let p = client_config_path(ClientId::ClaudeCode, &env.home);
         assert!(p.exists());
-        let v: serde_json::Value =
-            serde_json::from_str(&fs::read_to_string(p).unwrap()).unwrap();
+        let v: serde_json::Value = serde_json::from_str(&fs::read_to_string(p).unwrap()).unwrap();
         assert_eq!(v["mcpServers"]["soul"]["command"], binary_str(&env));
     }
 
@@ -779,8 +804,7 @@ mod tests {
         connect(&env, ClientId::Cursor).unwrap();
         let p = client_config_path(ClientId::Cursor, &env.home);
         assert!(p.exists());
-        let v: serde_json::Value =
-            serde_json::from_str(&fs::read_to_string(p).unwrap()).unwrap();
+        let v: serde_json::Value = serde_json::from_str(&fs::read_to_string(p).unwrap()).unwrap();
         assert_eq!(v["mcpServers"]["soul"]["command"], binary_str(&env));
 
         let env2 = TestEnv::new();
@@ -843,15 +867,22 @@ mod tests {
 
         // Пользователь добавил свой сервер после подключения.
         let p = client_config_path(ClientId::ClaudeCode, &env.home);
-        let mut v: serde_json::Value = serde_json::from_str(&fs::read_to_string(&p).unwrap()).unwrap();
+        let mut v: serde_json::Value =
+            serde_json::from_str(&fs::read_to_string(&p).unwrap()).unwrap();
         v["mcpServers"]["user-added"] = serde_json::json!({ "command": "y" });
         fs::write(&p, serde_json::to_string_pretty(&v).unwrap()).unwrap();
 
         disconnect(&env, ClientId::ClaudeCode).unwrap();
         let text = fs::read_to_string(&p).unwrap();
         let v: serde_json::Value = serde_json::from_str(&text).unwrap();
-        assert!(v["mcpServers"].get("soul").is_none(), "soul удаляется: {text}");
-        assert_eq!(v["mcpServers"]["user-added"]["command"], "y", "чужие изменения сохраняются");
+        assert!(
+            v["mcpServers"].get("soul").is_none(),
+            "soul удаляется: {text}"
+        );
+        assert_eq!(
+            v["mcpServers"]["user-added"]["command"], "y",
+            "чужие изменения сохраняются"
+        );
         assert_eq!(v["mcpServers"]["other"]["command"], "x");
     }
 
@@ -893,9 +924,15 @@ mod tests {
 
         let p = client_config_path(ClientId::Codex, &env.home);
         let text = fs::read_to_string(&p).unwrap();
-        assert!(text.contains("[mcp_servers.soul]"), "секция добавлена: {text}");
+        assert!(
+            text.contains("[mcp_servers.soul]"),
+            "секция добавлена: {text}"
+        );
         assert!(text.contains(&format!("command = '{}'", binary_str(&env))));
-        assert!(text.contains("[model]"), "чужое содержимое не тронуто: {text}");
+        assert!(
+            text.contains("[model]"),
+            "чужое содержимое не тронуто: {text}"
+        );
         assert!(text.contains("provider = \"openai\""));
 
         disconnect(&env, ClientId::Codex).unwrap();
@@ -913,7 +950,11 @@ mod tests {
         connect(&env, ClientId::Codex).unwrap();
 
         let p = client_config_path(ClientId::Codex, &env.home);
-        fs::write(&p, fs::read_to_string(&p).unwrap() + "[mcp_servers.newone]\ncommand = 'x'\n").unwrap();
+        fs::write(
+            &p,
+            fs::read_to_string(&p).unwrap() + "[mcp_servers.newone]\ncommand = 'x'\n",
+        )
+        .unwrap();
 
         disconnect(&env, ClientId::Codex).unwrap();
         let text = fs::read_to_string(&p).unwrap();

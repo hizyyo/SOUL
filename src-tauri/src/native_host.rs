@@ -36,7 +36,9 @@ pub fn run_reg(args: &[&str]) -> Result<Output, std::io::Error> {
 /// Заглушка runner для платформ без реестра (вызовы не производятся).
 #[cfg(not(target_os = "windows"))]
 fn noop_runner(_args: &[&str]) -> Result<Output, std::io::Error> {
-    Err(std::io::Error::other("registry is not available on this platform"))
+    Err(std::io::Error::other(
+        "registry is not available on this platform",
+    ))
 }
 
 /// Имя исполняемого файла host-а (soul-bridge.exe на Windows).
@@ -151,10 +153,7 @@ pub fn register_bridge(app_dir: &Path) -> Result<BridgeStatus, String> {
     }
 }
 
-pub fn register_bridge_for(
-    app_dir: &Path,
-    runner: &CommandRunner,
-) -> Result<BridgeStatus, String> {
+pub fn register_bridge_for(app_dir: &Path, runner: &CommandRunner) -> Result<BridgeStatus, String> {
     let manifest_path = host_manifest_path(app_dir);
     std::fs::create_dir_all(manifest_path.parent().unwrap())
         .map_err(|e| format!("Cannot create native-messaging directory: {e}"))?;
@@ -237,8 +236,7 @@ pub fn bridge_status_for(app_dir: &Path, runner: &CommandRunner) -> BridgeStatus
         let edge = registry_key_exists(runner, EDGE_REG_SUBKEY);
         status.registered = chrome || edge;
         if !chrome && !edge && status.manifest_exists {
-            status.error =
-                "Manifest exists but no browser registry key was found.".to_string();
+            status.error = "Manifest exists but no browser registry key was found.".to_string();
         }
     }
     #[cfg(not(target_os = "windows"))]
@@ -253,10 +251,10 @@ mod tests {
     use super::*;
     use std::sync::{Arc, Mutex};
 
-    #[cfg(target_os = "windows")]
-    use std::os::windows::process::ExitStatusExt as _;
     #[cfg(unix)]
     use std::os::unix::process::ExitStatusExt as _;
+    #[cfg(target_os = "windows")]
+    use std::os::windows::process::ExitStatusExt as _;
 
     /// Фейковый runner: записывает вызовы; `fail_contains` — если любой аргумент
     /// содержит подстроку, команда отвечает кодом 1. Замыкание 'static (Arc),
@@ -278,7 +276,10 @@ mod tests {
             let calls = self.calls.clone();
             let fail_contains = self.fail_contains.clone();
             move |args: &[&str]| {
-                calls.lock().unwrap().push(args.iter().map(|s| s.to_string()).collect());
+                calls
+                    .lock()
+                    .unwrap()
+                    .push(args.iter().map(|s| s.to_string()).collect());
                 let failed = fail_contains
                     .as_ref()
                     .map(|needle| args.iter().any(|a| a.contains(needle)))
@@ -321,13 +322,19 @@ mod tests {
 
     #[test]
     fn host_manifest_contains_name_type_path_and_allowed_origins() {
-        let manifest = host_manifest_json(Path::new("C:/App/soul-bridge.exe"), bridge::BRIDGE_EXTENSION_ID);
+        let manifest = host_manifest_json(
+            Path::new("C:/App/soul-bridge.exe"),
+            bridge::BRIDGE_EXTENSION_ID,
+        );
         assert_eq!(manifest["name"], bridge::BRIDGE_HOST_NAME);
         assert_eq!(manifest["type"], "stdio");
         assert_eq!(manifest["path"], "C:/App/soul-bridge.exe");
         assert_eq!(
             manifest["allowed_origins"],
-            json!([format!("chrome-extension://{}/", bridge::BRIDGE_EXTENSION_ID)])
+            json!([format!(
+                "chrome-extension://{}/",
+                bridge::BRIDGE_EXTENSION_ID
+            )])
         );
     }
 
@@ -348,14 +355,12 @@ mod tests {
             let calls = runner.calls();
             let adds: Vec<&Vec<String>> = calls.iter().filter(|c| c[0] == "add").collect();
             assert_eq!(adds.len(), 2, "chrome + edge keys");
-            assert!(
-                adds.iter()
-                    .any(|c| c[1].contains("Google\\Chrome\\NativeMessagingHosts"))
-            );
-            assert!(
-                adds.iter()
-                    .any(|c| c[1].contains("Microsoft\\Edge\\NativeMessagingHosts"))
-            );
+            assert!(adds
+                .iter()
+                .any(|c| c[1].contains("Google\\Chrome\\NativeMessagingHosts")));
+            assert!(adds
+                .iter()
+                .any(|c| c[1].contains("Microsoft\\Edge\\NativeMessagingHosts")));
             for call in &adds {
                 assert_eq!(call[2], "/ve");
                 assert_eq!(call[5], "/f");

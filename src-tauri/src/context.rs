@@ -410,9 +410,7 @@ pub fn detect_conflicts(entities: &[ContextEntity]) -> Vec<ContextConflict> {
             conflicts.push(ContextConflict {
                 a: anchor.id.clone(),
                 b: other.id.clone(),
-                reason: format!(
-                    "Same calibration question ({question_id}) with different answers"
-                ),
+                reason: format!("Same calibration question ({question_id}) with different answers"),
             });
         }
     }
@@ -441,7 +439,11 @@ fn compare_items(a: &ContextItem, b: &ContextItem) -> std::cmp::Ordering {
     b.priority
         .cmp(&a.priority)
         .then_with(|| b.relevance.cmp(&a.relevance))
-        .then_with(|| b.confidence.partial_cmp(&a.confidence).unwrap_or(std::cmp::Ordering::Equal))
+        .then_with(|| {
+            b.confidence
+                .partial_cmp(&a.confidence)
+                .unwrap_or(std::cmp::Ordering::Equal)
+        })
         .then_with(|| b.updated_at.cmp(&a.updated_at))
         .then_with(|| a.id.cmp(&b.id))
 }
@@ -478,19 +480,28 @@ fn serialize_pack_body_parts(
 /// контекст задачи. Текстовый запрос отсекает нерелевантные сущности полностью
 /// (relevance == 0 не попадает в пак); бюджет никогда не превышается.
 pub fn compile_context(entities: &[ContextEntity], query: &ContextQuery) -> ContextPack {
-    let raw = query.max_tokens.unwrap_or(CONTEXT_STANDARD_TOKENS as f64).floor();
+    let raw = query
+        .max_tokens
+        .unwrap_or(CONTEXT_STANDARD_TOKENS as f64)
+        .floor();
     let max_tokens = if raw.is_finite() {
         (raw.max(1.0).min(CONTEXT_HARD_MAX_TOKENS as f64)) as u64
     } else {
         CONTEXT_STANDARD_TOKENS
     };
     let allowed_sensitivity: Vec<String> = if query.sensitivity.is_empty() {
-        DEFAULT_ALLOWED_SENSITIVITY.iter().map(|s| s.to_string()).collect()
+        DEFAULT_ALLOWED_SENSITIVITY
+            .iter()
+            .map(|s| s.to_string())
+            .collect()
     } else {
         query.sensitivity.clone()
     };
     let allowed_statuses: Vec<String> = if query.statuses.is_empty() {
-        DEFAULT_ALLOWED_STATUSES.iter().map(|s| s.to_string()).collect()
+        DEFAULT_ALLOWED_STATUSES
+            .iter()
+            .map(|s| s.to_string())
+            .collect()
     } else {
         query.statuses.clone()
     };
@@ -661,7 +672,12 @@ mod tests {
         }
     }
 
-    fn calibration_data(question_id: &str, value: &str, sensitivity: &str, confidence: f64) -> String {
+    fn calibration_data(
+        question_id: &str,
+        value: &str,
+        sensitivity: &str,
+        confidence: f64,
+    ) -> String {
         format!(
             r#"{{"claim":"Q — {value}","evidence":"stated","questionId":"{question_id}","value":"{value}","confidence":{confidence},"sensitivity":"{sensitivity}","scope":{{"domains":["preferences"],"projects":[],"people":[],"channels":[]}}}}"#
         )
@@ -725,7 +741,10 @@ mod tests {
             "2026-07-05T00:00:00Z",
         );
 
-        let pack = compile_context(&[a.clone(), b.clone(), c.clone()], &query(ContextQuery::default()));
+        let pack = compile_context(
+            &[a.clone(), b.clone(), c.clone()],
+            &query(ContextQuery::default()),
+        );
         assert_eq!(pack.max_tokens, 900);
         assert_eq!(pack.items.len(), 2);
         assert_eq!(pack.items[0].entity_type, "boundary");
@@ -824,7 +843,10 @@ mod tests {
             "2026-01-01T00:00:00Z",
             "2026-01-01T00:00:00Z",
         );
-        let pack = compile_context(&[active.clone(), disputed.clone()], &query(ContextQuery::default()));
+        let pack = compile_context(
+            &[active.clone(), disputed.clone()],
+            &query(ContextQuery::default()),
+        );
         assert_eq!(pack.items.len(), 1);
         assert_eq!(pack.items[0].id, "ent_a");
 
@@ -848,7 +870,10 @@ mod tests {
             "2026-01-01T00:00:00Z",
             "2026-01-01T00:00:00Z",
         );
-        let pack = compile_context(std::slice::from_ref(&restricted), &query(ContextQuery::default()));
+        let pack = compile_context(
+            std::slice::from_ref(&restricted),
+            &query(ContextQuery::default()),
+        );
         assert!(pack.items.is_empty());
 
         let pack = compile_context(
@@ -949,7 +974,8 @@ mod tests {
     }
 
     #[test]
-    fn text_query_filters_by_relevance() {        let match_claim = entity(
+    fn text_query_filters_by_relevance() {
+        let match_claim = entity(
             "ent_a",
             "preference",
             "active",

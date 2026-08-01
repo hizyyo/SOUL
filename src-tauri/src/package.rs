@@ -149,10 +149,7 @@ pub struct ReceiptSummary {
 }
 
 /// Атомарная запись квитанции раскрытия в каталог receipts.
-pub fn write_disclosure_receipt(
-    app_dir: &Path,
-    receipt: &DisclosureReceipt,
-) -> Result<(), String> {
+pub fn write_disclosure_receipt(app_dir: &Path, receipt: &DisclosureReceipt) -> Result<(), String> {
     let receipts_dir = app_dir.join("receipts");
     fs::create_dir_all(&receipts_dir).map_err(|e| format!("Cannot write receipt: {e}"))?;
     let path = receipts_dir.join(format!("disclosure-{}.json", Uuid::new_v4()));
@@ -169,8 +166,8 @@ pub fn list_local_receipts(app_dir: &Path) -> Result<Vec<ReceiptSummary>, String
         return Ok(Vec::new());
     }
     let mut receipts = Vec::new();
-    let entries = std::fs::read_dir(&receipts_dir)
-        .map_err(|e| format!("Cannot read receipts: {e}"))?;
+    let entries =
+        std::fs::read_dir(&receipts_dir).map_err(|e| format!("Cannot read receipts: {e}"))?;
     for entry in entries.flatten() {
         let path = entry.path();
         if path.extension().and_then(|e| e.to_str()) != Some("json") {
@@ -238,14 +235,19 @@ pub fn build_export_payload(
         .ok_or("SOUL not found.".to_string())?;
     let entities = db::list_entities(conn, soul_id).map_err(|e| e.to_string())?;
     let events = db::list_events(conn, soul_id).map_err(|e| e.to_string())?;
-    let (step, answers, activated, _) = db::get_soul_state(conn, soul_id).map_err(|e| e.to_string())?;
+    let (step, answers, activated, _) =
+        db::get_soul_state(conn, soul_id).map_err(|e| e.to_string())?;
     Ok(SoulExportPayload {
         format: PAYLOAD_FORMAT.to_string(),
         version: PAYLOAD_VERSION.to_string(),
         soul,
         entities,
         events,
-        calibration: CalibrationPayload { step, answers, activated },
+        calibration: CalibrationPayload {
+            step,
+            answers,
+            activated,
+        },
     })
 }
 
@@ -339,13 +341,18 @@ fn verify_event_chain(payload: &SoulExportPayload) -> Result<(), String> {
     for ev in &payload.events {
         let h = db::compute_hash(&ev.payload);
         if h != ev.content_hash {
-            return Err(format!("Event {} content hash does not match its payload.", ev.event_id));
+            return Err(format!(
+                "Event {} content hash does not match its payload.",
+                ev.event_id
+            ));
         }
         last_hash = Some(h);
     }
-    let head = payload.soul.head_event_hash.as_deref().ok_or(
-        "Package event chain has no head event hash.".to_string(),
-    )?;
+    let head = payload
+        .soul
+        .head_event_hash
+        .as_deref()
+        .ok_or("Package event chain has no head event hash.".to_string())?;
     if last_hash.as_deref() != Some(head) {
         return Err("Package head event hash does not match the event chain.".into());
     }
@@ -380,10 +387,16 @@ pub fn verify_package_bytes(
         return Err("Unknown package format.".into());
     }
     if envelope.format_version != PACKAGE_FORMAT_VERSION {
-        return Err(format!("Unsupported package format version: {}.", envelope.format_version));
+        return Err(format!(
+            "Unsupported package format version: {}.",
+            envelope.format_version
+        ));
     }
     if envelope.schema_version != SCHEMA_VERSION {
-        return Err(format!("Unsupported schema version: {}.", envelope.schema_version));
+        return Err(format!(
+            "Unsupported schema version: {}.",
+            envelope.schema_version
+        ));
     }
     if envelope.cipher.name != "xchacha20-poly1305" {
         return Err("Unsupported cipher.".into());
@@ -392,25 +405,36 @@ pub fn verify_package_bytes(
         return Err("Unsupported key derivation function.".into());
     }
 
-    let signature_b64 = envelope.signature.as_deref().ok_or("Package is not signed.".to_string())?;
-    let signature = B64.decode(signature_b64).map_err(|_| "Invalid signature encoding.".to_string())?;
+    let signature_b64 = envelope
+        .signature
+        .as_deref()
+        .ok_or("Package is not signed.".to_string())?;
+    let signature = B64
+        .decode(signature_b64)
+        .map_err(|_| "Invalid signature encoding.".to_string())?;
     if signature.len() != crypto::SIG_LEN {
         return Err("Invalid signature length.".into());
     }
-    let salt = B64.decode(&envelope.cipher.salt).map_err(|_| "Invalid salt encoding.".to_string())?;
+    let salt = B64
+        .decode(&envelope.cipher.salt)
+        .map_err(|_| "Invalid salt encoding.".to_string())?;
     if salt.len() != crypto::SALT_LEN {
         return Err("Invalid salt length.".into());
     }
-    let nonce = B64.decode(&envelope.cipher.nonce).map_err(|_| "Invalid nonce encoding.".to_string())?;
+    let nonce = B64
+        .decode(&envelope.cipher.nonce)
+        .map_err(|_| "Invalid nonce encoding.".to_string())?;
     if nonce.len() != crypto::NONCE_LEN {
         return Err("Invalid nonce length.".into());
     }
-    let ciphertext = B64.decode(&envelope.payload_ciphertext)
+    let ciphertext = B64
+        .decode(&envelope.payload_ciphertext)
         .map_err(|_| "Invalid payload encoding.".to_string())?;
 
     let mut canonical_env = envelope.clone();
     canonical_env.signature = None;
-    let canonical = serde_json::to_vec(&canonical_env).map_err(|e| format!("Serialize failed: {e}"))?;
+    let canonical =
+        serde_json::to_vec(&canonical_env).map_err(|e| format!("Serialize failed: {e}"))?;
     let mut to_sign = sha256_bytes(&canonical).to_vec();
     to_sign.extend_from_slice(&ciphertext);
     if !crypto::verify_signature(&envelope.device_public_key, &to_sign, &signature) {
@@ -582,7 +606,10 @@ pub fn export_json(
     let text = serde_json::to_string_pretty(&doc).map_err(|e| format!("Serialize failed: {e}"))?;
     fs::write(path, text).map_err(|e| format!("Cannot write export file: {e}"))?;
     let size = fs::metadata(path).map(|m| m.len() as usize).unwrap_or(0);
-    Ok(JsonExportReceipt { path: path.to_string_lossy().to_string(), size_bytes: size })
+    Ok(JsonExportReceipt {
+        path: path.to_string_lossy().to_string(),
+        size_bytes: size,
+    })
 }
 
 fn claim_from_entity(e: &db::EntityRow) -> String {
@@ -606,11 +633,24 @@ pub fn export_markdown(
     out.push_str(&format!("# SOUL Export: {}\n\n", payload.soul.display_name));
     out.push_str(&format!("- Soul ID: `{}`\n", payload.soul.soul_id));
     out.push_str(&format!("- Created: {}\n", payload.soul.created_at));
-    out.push_str(&format!("- Schema version: {}\n", payload.soul.schema_version));
+    out.push_str(&format!(
+        "- Schema version: {}\n",
+        payload.soul.schema_version
+    ));
     out.push_str(&format!("- Entities: {}\n", payload.entities.len()));
     out.push_str(&format!("- Events: {}\n", payload.events.len()));
-    out.push_str(&format!("- Calibration step: {}\n", payload.calibration.step));
-    out.push_str(&format!("- Activated: {}\n", if payload.calibration.activated { "yes" } else { "no" }));
+    out.push_str(&format!(
+        "- Calibration step: {}\n",
+        payload.calibration.step
+    ));
+    out.push_str(&format!(
+        "- Activated: {}\n",
+        if payload.calibration.activated {
+            "yes"
+        } else {
+            "no"
+        }
+    ));
     if let Some(head) = &payload.soul.head_event_hash {
         out.push_str(&format!("- Head event hash: `{}`\n", head));
     }
@@ -624,14 +664,21 @@ pub fn export_markdown(
     for (etype, rows) in &by_type {
         out.push_str(&format!("## {}\n\n", etype));
         for e in rows {
-            out.push_str(&format!("- [{status}] {claim}\n", status = e.status, claim = claim_from_entity(e)));
+            out.push_str(&format!(
+                "- [{status}] {claim}\n",
+                status = e.status,
+                claim = claim_from_entity(e)
+            ));
         }
         out.push('\n');
     }
 
     fs::write(path, &out).map_err(|e| format!("Cannot write export file: {e}"))?;
     let size = fs::metadata(path).map(|m| m.len() as usize).unwrap_or(0);
-    Ok(MarkdownExportReceipt { path: path.to_string_lossy().to_string(), size_bytes: size })
+    Ok(MarkdownExportReceipt {
+        path: path.to_string_lossy().to_string(),
+        size_bytes: size,
+    })
 }
 
 pub fn wipe_local_data(
@@ -663,7 +710,10 @@ pub fn wipe_local_data(
 mod tests {
     use super::*;
     use crate::crypto;
-    use crate::db::{activate_soul, add_entity, confirm_soul_preview, create_soul, get_calibration, init_db, is_soul_activated, list_entities, list_events, list_souls, save_calibration};
+    use crate::db::{
+        activate_soul, add_entity, confirm_soul_preview, create_soul, get_calibration, init_db,
+        is_soul_activated, list_entities, list_events, list_souls, save_calibration,
+    };
     use rusqlite::Connection;
     use std::path::PathBuf;
 
@@ -692,12 +742,31 @@ mod tests {
 
     fn create_seeded_soul(env: &mut TestEnv) -> String {
         let soul = create_soul(&env.conn, "Тест Илья", "device_t1").unwrap();
-        add_entity(&env.conn, &soul.soul_id, "preference", "candidate",
-            r#"{"claim":"Prefer concise answers","source":"calibration"}"#, "device_t1").unwrap();
-        add_entity(&env.conn, &soul.soul_id, "boundary", "candidate",
-            r#"{"claim":"Never share financial data"}"#, "device_t1").unwrap();
-        save_calibration(&env.conn, &soul.soul_id, 2,
-            r#"[{"questionId":"q1","value":"yes"}]"#).unwrap();
+        add_entity(
+            &env.conn,
+            &soul.soul_id,
+            "preference",
+            "candidate",
+            r#"{"claim":"Prefer concise answers","source":"calibration"}"#,
+            "device_t1",
+        )
+        .unwrap();
+        add_entity(
+            &env.conn,
+            &soul.soul_id,
+            "boundary",
+            "candidate",
+            r#"{"claim":"Never share financial data"}"#,
+            "device_t1",
+        )
+        .unwrap();
+        save_calibration(
+            &env.conn,
+            &soul.soul_id,
+            2,
+            r#"[{"questionId":"q1","value":"yes"}]"#,
+        )
+        .unwrap();
         confirm_soul_preview(&env.conn, &soul.soul_id, "device_t1").unwrap();
         activate_soul(&env.conn, &soul.soul_id, "device_t1").unwrap();
         soul.soul_id
@@ -705,7 +774,15 @@ mod tests {
 
     fn export_fast(env: &TestEnv, soul_id: &str) -> PathBuf {
         let path = env.dir.join("backup.soul");
-        export_package_with_params(&env.conn, &env.dir, soul_id, PASSWORD, &path, Some(FAST_KDF)).unwrap();
+        export_package_with_params(
+            &env.conn,
+            &env.dir,
+            soul_id,
+            PASSWORD,
+            &path,
+            Some(FAST_KDF),
+        )
+        .unwrap();
         path
     }
 
@@ -764,7 +841,10 @@ mod tests {
         let path = export_fast(&env, &soul_id);
         let bytes = std::fs::read(&path).unwrap();
         let err = verify_package_bytes(&bytes, "wrong-passphrase", MAX_PACKAGE_BYTES).unwrap_err();
-        assert!(err.contains("Incorrect passphrase"), "unexpected error: {err}");
+        assert!(
+            err.contains("Incorrect passphrase"),
+            "unexpected error: {err}"
+        );
     }
 
     #[test]
@@ -779,8 +859,12 @@ mod tests {
         let mid = tampered.len() / 2;
         tampered[mid] ^= 0x01;
         envelope.payload_ciphertext = B64.encode(&tampered);
-        let err = verify_package_bytes(&serde_json::to_vec(&envelope).unwrap(), PASSWORD, MAX_PACKAGE_BYTES)
-            .unwrap_err();
+        let err = verify_package_bytes(
+            &serde_json::to_vec(&envelope).unwrap(),
+            PASSWORD,
+            MAX_PACKAGE_BYTES,
+        )
+        .unwrap_err();
         assert!(err.contains("signature"), "unexpected error: {err}");
     }
 
@@ -792,8 +876,12 @@ mod tests {
         let bytes = std::fs::read(&path).unwrap();
         let mut envelope: Envelope = serde_json::from_slice(&bytes).unwrap();
         envelope.display_name = "Attacker".to_string();
-        let err = verify_package_bytes(&serde_json::to_vec(&envelope).unwrap(), PASSWORD, MAX_PACKAGE_BYTES)
-            .unwrap_err();
+        let err = verify_package_bytes(
+            &serde_json::to_vec(&envelope).unwrap(),
+            PASSWORD,
+            MAX_PACKAGE_BYTES,
+        )
+        .unwrap_err();
         assert!(err.contains("signature"), "unexpected error: {err}");
     }
 
@@ -805,7 +893,10 @@ mod tests {
         let bytes = std::fs::read(&path).unwrap();
         let truncated = &bytes[..bytes.len() / 2];
         let err = verify_package_bytes(truncated, PASSWORD, MAX_PACKAGE_BYTES).unwrap_err();
-        assert!(err.contains("not a valid SOUL envelope"), "unexpected error: {err}");
+        assert!(
+            err.contains("not a valid SOUL envelope"),
+            "unexpected error: {err}"
+        );
     }
 
     #[test]
@@ -817,14 +908,22 @@ mod tests {
 
         let mut env_bad_format: Envelope = serde_json::from_slice(&bytes).unwrap();
         env_bad_format.format_version = "9.9.9".to_string();
-        let err = verify_package_bytes(&serde_json::to_vec(&env_bad_format).unwrap(), PASSWORD, MAX_PACKAGE_BYTES)
-            .unwrap_err();
+        let err = verify_package_bytes(
+            &serde_json::to_vec(&env_bad_format).unwrap(),
+            PASSWORD,
+            MAX_PACKAGE_BYTES,
+        )
+        .unwrap_err();
         assert!(err.contains("format version"), "unexpected error: {err}");
 
         let mut env_bad_schema: Envelope = serde_json::from_slice(&bytes).unwrap();
         env_bad_schema.schema_version = "0.2.0".to_string();
-        let err = verify_package_bytes(&serde_json::to_vec(&env_bad_schema).unwrap(), PASSWORD, MAX_PACKAGE_BYTES)
-            .unwrap_err();
+        let err = verify_package_bytes(
+            &serde_json::to_vec(&env_bad_schema).unwrap(),
+            PASSWORD,
+            MAX_PACKAGE_BYTES,
+        )
+        .unwrap_err();
         assert!(err.contains("schema version"), "unexpected error: {err}");
     }
 
@@ -836,8 +935,12 @@ mod tests {
         let bytes = std::fs::read(&path).unwrap();
         let mut envelope: Envelope = serde_json::from_slice(&bytes).unwrap();
         envelope.signature = None;
-        let err = verify_package_bytes(&serde_json::to_vec(&envelope).unwrap(), PASSWORD, MAX_PACKAGE_BYTES)
-            .unwrap_err();
+        let err = verify_package_bytes(
+            &serde_json::to_vec(&envelope).unwrap(),
+            PASSWORD,
+            MAX_PACKAGE_BYTES,
+        )
+        .unwrap_err();
         assert!(err.contains("not signed"), "unexpected error: {err}");
     }
 
@@ -892,7 +995,11 @@ mod tests {
 
         let err = import_package_file(&mut env.conn, &tampered_path, PASSWORD).unwrap_err();
         assert!(err.contains("signature"), "unexpected error: {err}");
-        assert_eq!(list_souls(&env.conn).unwrap().len(), 1, "storage must not change after failed import");
+        assert_eq!(
+            list_souls(&env.conn).unwrap().len(),
+            1,
+            "storage must not change after failed import"
+        );
     }
 
     #[test]
@@ -982,8 +1089,15 @@ mod tests {
         let mut env = TestEnv::new();
         let soul_id = create_seeded_soul(&mut env);
         let path = env.dir.join("weak.soul");
-        let err = export_package_with_params(&env.conn, &env.dir, &soul_id, "short", &path, Some(FAST_KDF))
-            .unwrap_err();
+        let err = export_package_with_params(
+            &env.conn,
+            &env.dir,
+            &soul_id,
+            "short",
+            &path,
+            Some(FAST_KDF),
+        )
+        .unwrap_err();
         assert!(err.contains("8 characters"), "unexpected error: {err}");
         assert!(!path.exists());
     }
@@ -992,8 +1106,15 @@ mod tests {
     fn export_requires_existing_soul() {
         let env = TestEnv::new();
         let path = env.dir.join("missing.soul");
-        let err = export_package_with_params(&env.conn, &env.dir, "soul_nonexistent", PASSWORD, &path, Some(FAST_KDF))
-            .unwrap_err();
+        let err = export_package_with_params(
+            &env.conn,
+            &env.dir,
+            "soul_nonexistent",
+            PASSWORD,
+            &path,
+            Some(FAST_KDF),
+        )
+        .unwrap_err();
         assert!(err.contains("SOUL not found"), "unexpected error: {err}");
     }
 
@@ -1004,12 +1125,29 @@ mod tests {
         let path1 = export_fast(&env, &soul_id);
         import_package_file(&mut env.conn, &path1, PASSWORD).unwrap();
         let path2 = env.dir.join("backup2.soul");
-        export_package_with_params(&env.conn, &env.dir, &soul_id, PASSWORD, &path2, Some(FAST_KDF)).unwrap();
+        export_package_with_params(
+            &env.conn,
+            &env.dir,
+            &soul_id,
+            PASSWORD,
+            &path2,
+            Some(FAST_KDF),
+        )
+        .unwrap();
         let bytes2 = std::fs::read(&path2).unwrap();
         let vp = verify_package_bytes(&bytes2, PASSWORD, MAX_PACKAGE_BYTES).unwrap();
         assert_eq!(vp.payload.entities.len(), 2);
-        assert_eq!(vp.payload.events.len(), std::fs::read(&path1).map(|b| {
-            verify_package_bytes(&b, PASSWORD, MAX_PACKAGE_BYTES).unwrap().payload.events.len()
-        }).unwrap());
+        assert_eq!(
+            vp.payload.events.len(),
+            std::fs::read(&path1)
+                .map(|b| {
+                    verify_package_bytes(&b, PASSWORD, MAX_PACKAGE_BYTES)
+                        .unwrap()
+                        .payload
+                        .events
+                        .len()
+                })
+                .unwrap()
+        );
     }
 }

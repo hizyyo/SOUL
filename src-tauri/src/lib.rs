@@ -1,21 +1,21 @@
+pub mod bridge;
+mod context;
 mod crypto;
 mod db;
 mod eval;
 mod integrations;
-mod package;
-mod context;
-pub mod bridge;
 mod native_host;
+mod package;
 
 pub mod mcp;
 
 use db::{
-    init_db, create_soul, add_entity, list_entities, get_soul, list_souls,
-    get_calibration, save_calibration, activate_soul, is_soul_activated,
-    update_entity, activate_preview, confirm_soul_preview, reset_soul_preview,
+    activate_preview, activate_soul, add_entity, confirm_soul_preview, create_soul,
+    get_calibration, get_soul, init_db, is_soul_activated, list_entities, list_souls,
+    reset_soul_preview, save_calibration, update_entity,
 };
 use package::{
-    ExportReceipt, ImportPreview, DeletionReceipt, JsonExportReceipt, MarkdownExportReceipt,
+    DeletionReceipt, ExportReceipt, ImportPreview, JsonExportReceipt, MarkdownExportReceipt,
     ReceiptSummary,
 };
 use serde::{Deserialize, Serialize};
@@ -58,10 +58,7 @@ pub struct CalibrationState {
     answers: String,
 }
 
-fn soul_to_info(
-    conn: &rusqlite::Connection,
-    s: &db::SoulManifest,
-) -> SoulInfo {
+fn soul_to_info(conn: &rusqlite::Connection, s: &db::SoulManifest) -> SoulInfo {
     let activated = is_soul_activated(conn, &s.soul_id).unwrap_or(false);
     let (cstep, _, _, preview_confirmed) =
         db::get_soul_state(conn, &s.soul_id).unwrap_or((0, "[]".to_string(), false, false));
@@ -162,13 +159,7 @@ fn update_entity_cmd(
     device_id: String,
 ) -> Result<EntityInfo, String> {
     let conn = state.conn.lock().map_err(|e| e.to_string())?;
-    let row = update_entity(
-        &conn,
-        &entity_id,
-        &status,
-        data.as_deref(),
-        &device_id,
-    )?;
+    let row = update_entity(&conn, &entity_id, &status, data.as_deref(), &device_id)?;
     Ok(entity_to_info(&row))
 }
 
@@ -287,7 +278,13 @@ fn export_soul_cmd(
 ) -> Result<ExportReceipt, String> {
     let conn = state.conn.lock().map_err(|e| e.to_string())?;
     let app_dir = app.path().app_data_dir().map_err(|e| e.to_string())?;
-    package::export_package(&conn, &app_dir, &soul_id, &password, std::path::Path::new(&path))
+    package::export_package(
+        &conn,
+        &app_dir,
+        &soul_id,
+        &password,
+        std::path::Path::new(&path),
+    )
 }
 
 #[tauri::command]
@@ -502,7 +499,10 @@ pub fn run() {
             delete_evaluation_cmd,
         ])
         .setup(|app| {
-            let app_dir = app.path().app_data_dir().expect("Failed to get app data dir");
+            let app_dir = app
+                .path()
+                .app_data_dir()
+                .expect("Failed to get app data dir");
             std::fs::create_dir_all(&app_dir).expect("Failed to create app data dir");
             let conn = init_db(&app_dir).expect("Failed to initialize database");
             let state = app.state::<AppState>();

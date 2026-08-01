@@ -111,12 +111,7 @@ pub fn open_app_db(app_dir: &Path) -> Result<Connection, String> {
     let db_path = app_dir.join("soul.db");
     Connection::open_with_flags(&db_path, OpenFlags::SQLITE_OPEN_READ_ONLY)
         .or_else(|_| Connection::open_with_flags(&db_path, OpenFlags::SQLITE_OPEN_READ_WRITE))
-        .map_err(|_| {
-            format!(
-                "SOUL database not found at {}.",
-                db_path.to_string_lossy()
-            )
-        })
+        .map_err(|_| format!("SOUL database not found at {}.", db_path.to_string_lossy()))
 }
 
 /// Резолв app_dir для MCP-процесса: SOUL_APP_DIR (тесты/отладка) →
@@ -164,7 +159,9 @@ pub fn serve_io<R: BufRead, W: Write>(
             let json = serde_json::to_string(&response)
                 .map_err(|e| format!("response serialization failed: {e}"))?;
             writeln!(writer, "{json}").map_err(|e| format!("stdout write failed: {e}"))?;
-            writer.flush().map_err(|e| format!("stdout flush failed: {e}"))?;
+            writer
+                .flush()
+                .map_err(|e| format!("stdout flush failed: {e}"))?;
         }
     }
     Ok(())
@@ -191,10 +188,18 @@ pub fn handle_line(line: &str, app_dir: &Path) -> Option<Value> {
         }
     };
     let Some(msg) = parsed.as_object() else {
-        return Some(rpc_error(Value::Null, JSONRPC_INVALID_REQUEST, "Invalid Request"));
+        return Some(rpc_error(
+            Value::Null,
+            JSONRPC_INVALID_REQUEST,
+            "Invalid Request",
+        ));
     };
     if msg.get("jsonrpc").and_then(|v| v.as_str()) != Some("2.0") {
-        return Some(rpc_error(Value::Null, JSONRPC_INVALID_REQUEST, "Invalid Request"));
+        return Some(rpc_error(
+            Value::Null,
+            JSONRPC_INVALID_REQUEST,
+            "Invalid Request",
+        ));
     }
     let id = msg.get("id").cloned();
     let Some(id) = id else {
@@ -217,7 +222,10 @@ pub fn handle_line(line: &str, app_dir: &Path) -> Option<Value> {
             "arguments": []
         }] })),
         "prompts/get" => handle_prompt_get(msg),
-        _ => Err((JSONRPC_METHOD_NOT_FOUND, format!("Method not found: {method}"))),
+        _ => Err((
+            JSONRPC_METHOD_NOT_FOUND,
+            format!("Method not found: {method}"),
+        )),
     };
     Some(match response {
         Ok(result) => json!({ "jsonrpc": "2.0", "id": id, "result": result }),
@@ -383,8 +391,11 @@ mod tests {
     #[test]
     fn initialize_returns_capabilities_and_server_info() {
         let env = TestEnv::new();
-        let res = send(&env, r#"{"jsonrpc":"2.0","id":1,"method":"initialize","params":{}}"#)
-            .expect("response");
+        let res = send(
+            &env,
+            r#"{"jsonrpc":"2.0","id":1,"method":"initialize","params":{}}"#,
+        )
+        .expect("response");
         assert_eq!(res["id"], 1);
         assert_eq!(res["result"]["protocolVersion"], MCP_PROTOCOL_VERSION);
         assert_eq!(res["result"]["serverInfo"]["name"], SERVER_NAME);
@@ -403,27 +414,43 @@ mod tests {
     #[test]
     fn notifications_get_no_response() {
         let env = TestEnv::new();
-        assert!(send(&env, r#"{"jsonrpc":"2.0","method":"notifications/initialized"}"#).is_none());
-        assert!(send(&env, r#"{"jsonrpc":"2.0","method":"notifications/cancelled","params":{"requestId":1}}"#).is_none());
+        assert!(send(
+            &env,
+            r#"{"jsonrpc":"2.0","method":"notifications/initialized"}"#
+        )
+        .is_none());
+        assert!(send(
+            &env,
+            r#"{"jsonrpc":"2.0","method":"notifications/cancelled","params":{"requestId":1}}"#
+        )
+        .is_none());
     }
 
     #[test]
     fn tools_list_contains_get_context_with_schema() {
         let env = TestEnv::new();
-        let res = send(&env, r#"{"jsonrpc":"2.0","id":3,"method":"tools/list"}"#).expect("response");
+        let res =
+            send(&env, r#"{"jsonrpc":"2.0","id":3,"method":"tools/list"}"#).expect("response");
         let tools = res["result"]["tools"].as_array().unwrap();
         assert_eq!(tools.len(), 1);
         assert_eq!(tools[0]["name"], TOOL_GET_CONTEXT);
         let schema = &tools[0]["inputSchema"];
         assert_eq!(schema["type"], "object");
         assert_eq!(schema["properties"]["maxTokens"]["maximum"], 3000);
-        assert_eq!(schema["properties"]["sensitivity"]["items"]["enum"].as_array().unwrap().len(), 5);
+        assert_eq!(
+            schema["properties"]["sensitivity"]["items"]["enum"]
+                .as_array()
+                .unwrap()
+                .len(),
+            5
+        );
     }
 
     #[test]
     fn prompts_list_and_get() {
         let env = TestEnv::new();
-        let res = send(&env, r#"{"jsonrpc":"2.0","id":4,"method":"prompts/list"}"#).expect("response");
+        let res =
+            send(&env, r#"{"jsonrpc":"2.0","id":4,"method":"prompts/list"}"#).expect("response");
         assert_eq!(res["result"]["prompts"][0]["name"], PROMPT_TASK_START);
 
         let res = send(
@@ -562,9 +589,16 @@ mod tests {
         let env = TestEnv::new();
         let exe = std::env::current_exe().unwrap();
         let mut bin = exe.parent().unwrap().parent().unwrap().to_path_buf();
-        bin.push(if cfg!(windows) { "soul-mcp.exe" } else { "soul-mcp" });
+        bin.push(if cfg!(windows) {
+            "soul-mcp.exe"
+        } else {
+            "soul-mcp"
+        });
         if !bin.exists() {
-            eprintln!("soul-mcp binary not built; skipping E2E test ({})", bin.display());
+            eprintln!(
+                "soul-mcp binary not built; skipping E2E test ({})",
+                bin.display()
+            );
             return;
         }
 
@@ -600,10 +634,19 @@ mod tests {
         );
         assert!(res.get("error").is_none(), "unexpected error: {res}");
         let content = res["result"]["content"].as_array().unwrap();
-        assert!(content[0]["text"].as_str().unwrap().starts_with("SOUL CONTEXT"));
+        assert!(content[0]["text"]
+            .as_str()
+            .unwrap()
+            .starts_with("SOUL CONTEXT"));
         assert!(content[0]["text"].as_str().unwrap().contains("entities: 2"));
-        assert!(content[0]["text"].as_str().unwrap().contains("Prefers concise answers"));
-        assert!(content[0]["text"].as_str().unwrap().contains("Never share medical data"));
+        assert!(content[0]["text"]
+            .as_str()
+            .unwrap()
+            .contains("Prefers concise answers"));
+        assert!(content[0]["text"]
+            .as_str()
+            .unwrap()
+            .contains("Never share medical data"));
 
         // Квитанция disclosure появилась в каталоге.
         let receipts_dir = env.dir.join("receipts");
@@ -617,13 +660,17 @@ mod tests {
                 assert!(status.success(), "soul-mcp exited with {status}");
                 break;
             }
-            assert!(std::time::Instant::now() < deadline, "soul-mcp did not exit on stdin EOF");
+            assert!(
+                std::time::Instant::now() < deadline,
+                "soul-mcp did not exit on stdin EOF"
+            );
             std::thread::sleep(Duration::from_millis(50));
         }
     }
 
     #[test]
-    fn empty_database_yields_empty_pack() {        let dir = std::env::temp_dir().join(format!("soul-mcp-empty-{}", uuid::Uuid::new_v4()));
+    fn empty_database_yields_empty_pack() {
+        let dir = std::env::temp_dir().join(format!("soul-mcp-empty-{}", uuid::Uuid::new_v4()));
         std::fs::create_dir_all(&dir).unwrap();
         init_db(&dir).unwrap(); // БД есть, душ нет
         let res = handle_line(

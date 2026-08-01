@@ -30,7 +30,10 @@ pub fn keys_dir(app_dir: &Path) -> std::path::PathBuf {
 }
 
 fn key_paths(app_dir: &Path) -> (std::path::PathBuf, std::path::PathBuf) {
-    (keys_dir(app_dir).join("device_ed25519.secret"), keys_dir(app_dir).join("device_ed25519.pub"))
+    (
+        keys_dir(app_dir).join("device_ed25519.secret"),
+        keys_dir(app_dir).join("device_ed25519.pub"),
+    )
 }
 
 pub fn ensure_device_keypair(app_dir: &Path) -> Result<DeviceKeys, String> {
@@ -46,7 +49,9 @@ pub fn ensure_device_keypair(app_dir: &Path) -> Result<DeviceKeys, String> {
         }
         return Ok(DeviceKeys {
             public_b64: B64.encode(public),
-            private_bytes: secret.try_into().map_err(|_| "Corrupted device key.".to_string())?,
+            private_bytes: secret
+                .try_into()
+                .map_err(|_| "Corrupted device key.".to_string())?,
         });
     }
 
@@ -85,8 +90,15 @@ pub fn default_kdf_params() -> (u32, u32, u32) {
     (KDF_MEM_KIB, KDF_TIME, KDF_PARALLELISM)
 }
 
-fn derive_key(password: &str, salt: &[u8], mem_kib: u32, time: u32, p: u32) -> Result<[u8; KEY_LEN], String> {
-    let params = Params::new(mem_kib, time, p, Some(KEY_LEN)).map_err(|e| format!("Invalid KDF params: {e}"))?;
+fn derive_key(
+    password: &str,
+    salt: &[u8],
+    mem_kib: u32,
+    time: u32,
+    p: u32,
+) -> Result<[u8; KEY_LEN], String> {
+    let params = Params::new(mem_kib, time, p, Some(KEY_LEN))
+        .map_err(|e| format!("Invalid KDF params: {e}"))?;
     let argon2 = Argon2::new(Algorithm::Argon2id, Version::V0x13, params);
     let mut key = [0u8; KEY_LEN];
     argon2
@@ -119,7 +131,11 @@ pub fn encrypt_payload(
     let ciphertext = cipher
         .encrypt(XNonce::from_slice(&nonce), plaintext)
         .map_err(|_| "Encryption failed.".to_string())?;
-    Ok(SealedBox { ciphertext, salt, nonce })
+    Ok(SealedBox {
+        ciphertext,
+        salt,
+        nonce,
+    })
 }
 
 pub fn decrypt_payload(
@@ -162,9 +178,7 @@ pub fn verify_signature(public_b64: &str, msg: &[u8], sig_bytes: &[u8]) -> bool 
         Err(_) => return false,
     };
     let signature = Signature::from_bytes(&sig_bytes);
-    verifying_key
-        .verify_strict(msg, &signature)
-        .is_ok()
+    verifying_key.verify_strict(msg, &signature).is_ok()
 }
 
 pub fn sha256_hex(data: &[u8]) -> String {

@@ -158,7 +158,9 @@ pub fn write_frame<W: Write>(writer: &mut W, payload: &[u8]) -> Result<(), Strin
     writer
         .write_all(payload)
         .map_err(|e| format!("stdout write failed: {e}"))?;
-    writer.flush().map_err(|e| format!("stdout flush failed: {e}"))
+    writer
+        .flush()
+        .map_err(|e| format!("stdout flush failed: {e}"))
 }
 
 /// Непрерывный цикл host-процесса: stdin → кадры, stdout → кадры.
@@ -204,15 +206,15 @@ pub fn serve_frames<R: Read, W: Write>(
 
 /// Обработка одного кадра. None — ответ не требуется (не бывает в этом
 /// протоколе: каждый запрос имеет ответ).
-pub fn handle_frame(
-    frame: &[u8],
-    app_dir: &Path,
-    session: &mut BridgeSession,
-) -> Option<Value> {
+pub fn handle_frame(frame: &[u8], app_dir: &Path, session: &mut BridgeSession) -> Option<Value> {
     let parsed: Value = match serde_json::from_slice(frame) {
         Ok(v) => v,
         Err(_) => {
-            return Some(error_response(None, ERR_INVALID_REQUEST, "Invalid JSON frame."));
+            return Some(error_response(
+                None,
+                ERR_INVALID_REQUEST,
+                "Invalid JSON frame.",
+            ));
         }
     };
     let Some(msg) = parsed.as_object() else {
@@ -222,24 +224,44 @@ pub fn handle_frame(
     // Протокол: первым делом — версия, затем общие поля.
     if msg.get("protocol").and_then(|v| v.as_str()) != Some(BRIDGE_PROTOCOL_VERSION) {
         let nonce = msg.get("nonce").and_then(|v| v.as_str());
-        return Some(error_response(nonce, ERR_INVALID_PROTOCOL, "Unsupported protocol version."));
+        return Some(error_response(
+            nonce,
+            ERR_INVALID_PROTOCOL,
+            "Unsupported protocol version.",
+        ));
     }
     let Some(extension_id) = msg.get("extensionId").and_then(|v| v.as_str()) else {
         let nonce = msg.get("nonce").and_then(|v| v.as_str());
-        return Some(error_response(nonce, ERR_INVALID_EXTENSION_ID, "Missing extension ID."));
+        return Some(error_response(
+            nonce,
+            ERR_INVALID_EXTENSION_ID,
+            "Missing extension ID.",
+        ));
     };
     if !allowed_extension_ids().iter().any(|id| id == extension_id) {
         let nonce = msg.get("nonce").and_then(|v| v.as_str());
-        return Some(error_response(nonce, ERR_INVALID_EXTENSION_ID, "Unknown extension ID."));
+        return Some(error_response(
+            nonce,
+            ERR_INVALID_EXTENSION_ID,
+            "Unknown extension ID.",
+        ));
     }
     let Some(nonce) = msg.get("nonce").and_then(|v| v.as_str()) else {
         return Some(error_response(None, ERR_INVALID_NONCE, "Missing nonce."));
     };
     if !is_valid_nonce(nonce) {
-        return Some(error_response(Some(nonce), ERR_INVALID_NONCE, "Malformed nonce."));
+        return Some(error_response(
+            Some(nonce),
+            ERR_INVALID_NONCE,
+            "Malformed nonce.",
+        ));
     }
     if !session.register_nonce(nonce) {
-        return Some(error_response(Some(nonce), ERR_REPLAY_DETECTED, "Nonce already used."));
+        return Some(error_response(
+            Some(nonce),
+            ERR_REPLAY_DETECTED,
+            "Nonce already used.",
+        ));
     }
 
     let request_type = msg.get("type").and_then(|v| v.as_str()).unwrap_or_default();
@@ -259,11 +281,7 @@ pub fn handle_frame(
     }
 }
 
-fn handle_get_context(
-    msg: &serde_json::Map<String, Value>,
-    nonce: &str,
-    app_dir: &Path,
-) -> Value {
+fn handle_get_context(msg: &serde_json::Map<String, Value>, nonce: &str, app_dir: &Path) -> Value {
     let Some(origin) = msg.get("origin").and_then(|v| v.as_str()) else {
         return error_response(Some(nonce), ERR_INVALID_ORIGIN, "Missing origin.");
     };
@@ -284,9 +302,7 @@ fn handle_get_context(
     let max_tokens = match msg.get("maxTokens") {
         None | Some(Value::Null) => None,
         Some(Value::Number(n)) => match n.as_u64() {
-            Some(v) if (1..=context::CONTEXT_HARD_MAX_TOKENS).contains(&v) => {
-                Some(v as f64)
-            }
+            Some(v) if (1..=context::CONTEXT_HARD_MAX_TOKENS).contains(&v) => Some(v as f64),
             _ => {
                 return error_response(
                     Some(nonce),
@@ -391,7 +407,8 @@ mod tests {
 
     impl TestEnv {
         fn new() -> TestEnv {
-            let dir = std::env::temp_dir().join(format!("soul-bridge-test-{}", uuid::Uuid::new_v4()));
+            let dir =
+                std::env::temp_dir().join(format!("soul-bridge-test-{}", uuid::Uuid::new_v4()));
             std::fs::create_dir_all(&dir).unwrap();
             let conn = init_db(&dir).unwrap();
             let soul = create_soul(&conn, "Тест", "device_b").unwrap();
@@ -503,7 +520,10 @@ mod tests {
     fn rejects_unknown_extension_id() {
         let env = TestEnv::new();
         let mut session = BridgeSession::new();
-        let res = env.send(&env.valid_request(&[("extensionId", json!("a".repeat(32)))]), &mut session);
+        let res = env.send(
+            &env.valid_request(&[("extensionId", json!("a".repeat(32)))]),
+            &mut session,
+        );
         assert_eq!(res["code"], ERR_INVALID_EXTENSION_ID);
         assert_eq!(res["ok"], false);
         assert!(receipt_texts(&env).is_empty());
@@ -526,7 +546,10 @@ mod tests {
         let env = TestEnv::new();
         let mut session = BridgeSession::new();
 
-        let res = env.send(&env.valid_request(&[("nonce", json!("short"))]), &mut session);
+        let res = env.send(
+            &env.valid_request(&[("nonce", json!("short"))]),
+            &mut session,
+        );
         assert_eq!(res["code"], ERR_INVALID_NONCE);
 
         let res = env.send(
@@ -581,9 +604,11 @@ mod tests {
         let env = TestEnv::new();
         let mut session = BridgeSession::new();
         let huge = "a".repeat(BRIDGE_MAX_TASK_CHARS + 1);
-        let json = env
-            .valid_request(&[])
-            .replacen("\"task\":\"concise answers\"", &format!("\"task\":\"{huge}\""), 1);
+        let json = env.valid_request(&[]).replacen(
+            "\"task\":\"concise answers\"",
+            &format!("\"task\":\"{huge}\""),
+            1,
+        );
         let res = env.send(&json, &mut session);
         assert_eq!(res["code"], ERR_TASK_TOO_LONG);
         assert!(receipt_texts(&env).is_empty());
@@ -593,9 +618,11 @@ mod tests {
     fn task_filters_irrelevant_entities() {
         let env = TestEnv::new();
         let mut session = BridgeSession::new();
-        let json = env
-            .valid_request(&[])
-            .replacen("\"task\":\"concise answers\"", "\"task\":\"xylophone\"", 1);
+        let json = env.valid_request(&[]).replacen(
+            "\"task\":\"concise answers\"",
+            "\"task\":\"xylophone\"",
+            1,
+        );
         let res = env.send(&json, &mut session);
         assert_eq!(res["entityCount"], 0);
         assert!(res["pack"].as_str().unwrap().contains("entities: 0"));
@@ -714,7 +741,10 @@ mod tests {
         let mut reader = Cursor::new(input);
         let mut out: Vec<u8> = Vec::new();
         let result = serve_frames(&mut reader, &mut out, &env.dir, &mut BridgeSession::new());
-        assert!(result.is_err(), "соединение должно закрыться на oversized-кадре");
+        assert!(
+            result.is_err(),
+            "соединение должно закрыться на oversized-кадре"
+        );
         let mut out_reader = Cursor::new(out);
         let first = read_frame(&mut out_reader).unwrap().unwrap();
         let first_json: Value = serde_json::from_slice(&first).unwrap();
@@ -747,9 +777,16 @@ mod tests {
         let env = TestEnv::new();
         let exe = std::env::current_exe().unwrap();
         let mut bin = exe.parent().unwrap().parent().unwrap().to_path_buf();
-        bin.push(if cfg!(windows) { "soul-bridge.exe" } else { "soul-bridge" });
+        bin.push(if cfg!(windows) {
+            "soul-bridge.exe"
+        } else {
+            "soul-bridge"
+        });
         if !bin.exists() {
-            eprintln!("soul-bridge binary not built; skipping E2E test ({})", bin.display());
+            eprintln!(
+                "soul-bridge binary not built; skipping E2E test ({})",
+                bin.display()
+            );
             return;
         }
 
@@ -765,7 +802,9 @@ mod tests {
         let mut stdout = std::io::BufReader::new(child.stdout.take().unwrap());
 
         let mut request = |stdin: &mut std::process::ChildStdin, frame: &[u8]| {
-            stdin.write_all(&(frame.len() as u32).to_le_bytes()).unwrap();
+            stdin
+                .write_all(&(frame.len() as u32).to_le_bytes())
+                .unwrap();
             stdin.write_all(frame).unwrap();
             stdin.flush().unwrap();
             let mut len_buf = [0u8; 4];
@@ -787,9 +826,18 @@ mod tests {
         );
         let res = request(&mut stdin, ctx.as_bytes());
         assert_eq!(res["type"], "soul.context");
-        assert_eq!(res["entityCount"], 1, "only the preference matches 'concise'");
-        assert!(res["pack"].as_str().unwrap().contains("Prefers concise answers"));
-        assert!(!res["pack"].as_str().unwrap().contains("Never share medical data"));
+        assert_eq!(
+            res["entityCount"], 1,
+            "only the preference matches 'concise'"
+        );
+        assert!(res["pack"]
+            .as_str()
+            .unwrap()
+            .contains("Prefers concise answers"));
+        assert!(!res["pack"]
+            .as_str()
+            .unwrap()
+            .contains("Never share medical data"));
 
         let receipts = receipt_texts(&env);
         assert_eq!(receipts.len(), 1);
@@ -802,7 +850,10 @@ mod tests {
                 assert!(status.success(), "soul-bridge exited with {status}");
                 break;
             }
-            assert!(std::time::Instant::now() < deadline, "soul-bridge did not exit on stdin EOF");
+            assert!(
+                std::time::Instant::now() < deadline,
+                "soul-bridge did not exit on stdin EOF"
+            );
             std::thread::sleep(Duration::from_millis(50));
         }
     }
