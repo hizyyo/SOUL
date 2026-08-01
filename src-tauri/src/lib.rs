@@ -6,6 +6,7 @@ mod eval;
 mod integrations;
 mod native_host;
 mod package;
+mod policy;
 
 pub mod mcp;
 
@@ -453,6 +454,48 @@ fn delete_evaluation_cmd(
     eval::delete_evaluation(&conn, &evaluation_id)
 }
 
+#[tauri::command]
+fn create_policy_cmd(
+    state: tauri::State<AppState>,
+    rule_json: String,
+) -> Result<policy::PolicyRow, String> {
+    let conn = state.conn.lock().map_err(|e| e.to_string())?;
+    policy::create_policy(&conn, &rule_json)
+}
+
+#[tauri::command]
+fn list_policies_cmd(state: tauri::State<AppState>) -> Result<Vec<policy::PolicyRow>, String> {
+    let conn = state.conn.lock().map_err(|e| e.to_string())?;
+    policy::list_policies(&conn)
+}
+
+#[tauri::command]
+fn set_policy_enabled_cmd(
+    state: tauri::State<AppState>,
+    policy_id: String,
+    enabled: bool,
+) -> Result<policy::PolicyRow, String> {
+    let conn = state.conn.lock().map_err(|e| e.to_string())?;
+    policy::set_policy_enabled(&conn, &policy_id, enabled)
+}
+
+#[tauri::command]
+fn delete_policy_cmd(state: tauri::State<AppState>, policy_id: String) -> Result<(), String> {
+    let conn = state.conn.lock().map_err(|e| e.to_string())?;
+    policy::delete_policy(&conn, &policy_id)
+}
+
+#[tauri::command]
+fn evaluate_action_cmd(
+    state: tauri::State<AppState>,
+    action_json: String,
+) -> Result<policy::Decision, String> {
+    let conn = state.conn.lock().map_err(|e| e.to_string())?;
+    let action: policy::SoulAction = serde_json::from_str(&action_json)
+        .map_err(|e| format!("Action is not valid SoulAction JSON: {e}"))?;
+    policy::evaluate(&conn, &action)
+}
+
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     tauri::Builder::default()
@@ -497,6 +540,11 @@ pub fn run() {
             submit_evaluation_choice_cmd,
             list_evaluations_cmd,
             delete_evaluation_cmd,
+            create_policy_cmd,
+            list_policies_cmd,
+            set_policy_enabled_cmd,
+            delete_policy_cmd,
+            evaluate_action_cmd,
         ])
         .setup(|app| {
             let app_dir = app

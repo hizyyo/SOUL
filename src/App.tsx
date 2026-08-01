@@ -6,6 +6,7 @@ import { Inbox } from './pages/Inbox';
 import { Preview } from './pages/Preview';
 import { Tests } from './pages/Tests';
 import { ContextPage } from './pages/Context';
+import { Policies } from './pages/Policies';
 import { Settings } from './pages/Settings';
 import { CALIBRATION_STEPS, TOTAL_STEPS, type CalibrationAnswer } from './data/calibration';
 import { compileAnswers } from './data/compile';
@@ -460,6 +461,8 @@ export function App() {
         <Tests soul={soul} entities={entities} />
       ) : tab === 'context' ? (
         <ContextPage soul={soul} entities={entities} />
+      ) : tab === 'policies' ? (
+        <Policies />
       ) : (
         <Settings
           soul={soul}

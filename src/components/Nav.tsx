@@ -1,4 +1,4 @@
-export type Tab = 'home' | 'inbox' | 'preview' | 'tests' | 'context' | 'settings';
+export type Tab = 'home' | 'inbox' | 'preview' | 'tests' | 'context' | 'policies' | 'settings';
 
 interface NavProps {
   active: Tab;
@@ -12,6 +12,7 @@ const TABS: { id: Tab; label: string }[] = [
   { id: 'inbox', label: 'Inbox' },
   { id: 'tests', label: 'Tests' },
   { id: 'context', label: 'Context' },
+  { id: 'policies', label: 'Policies' },
   { id: 'settings', label: 'Settings' },
 ];
 
