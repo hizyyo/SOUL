@@ -110,3 +110,4 @@
 ## Коммит
 
 - `9fcca2a` `feat(soul): browser companion extension for ChatGPT, Gemini and Claude web chats [session-09]`
+- `53c7d8e` `fix(soul): bridge closes connection on protocol violation, integer-only maxTokens [session-09]` — review-pass: oversized/пустой кадр закрывает соединение вместо чтения мусора (выделен `serve_frames` для тестируемости), `maxTokens` принимает только целые 1..=3000; тесты `serve_loop_closes_on_oversized_frame`, `fractional_max_tokens_is_rejected`.

@@ -51,7 +51,10 @@ pub const ERR_INVALID_REQUEST: &str = "invalid_request";
 pub const ERR_UNSUPPORTED_REQUEST: &str = "unsupported_request";
 pub const ERR_RUNTIME_ERROR: &str = "runtime_error";
 
-/// Открывает БД SOUL только на чтение (никаких записей из host-процесса).
+/// Открывает БД SOUL. Сначала — строго на чтение (host не должен писать
+/// бизнес-данные); если read-only открытие невозможно (WAL требует доступа
+/// к `-wal`/`-shm`), открывает read-write — это только служебные файлы
+/// SQLite, в таблицы host не пишет.
 pub fn open_app_db(app_dir: &Path) -> Result<Connection, String> {
     let db_path = app_dir.join("soul.db");
     Connection::open_with_flags(&db_path, OpenFlags::SQLITE_OPEN_READ_ONLY)
@@ -165,24 +168,36 @@ pub fn serve_native_messaging(app_dir: &Path) -> Result<(), String> {
     let mut reader = std::io::BufReader::new(stdin.lock());
     let mut writer = std::io::BufWriter::new(stdout.lock());
     let mut session = BridgeSession::new();
+    serve_frames(&mut reader, &mut writer, app_dir, &mut session)
+}
+
+/// Обработка потока кадров до EOF. На кадре, нарушающем границы протокола
+/// (oversized, пустой), пишет ошибку и ЗАКРЫВАЕТ соединение: после такого
+/// кадра поток stdin рассинхронизирован, продолжение читало бы мусор.
+pub fn serve_frames<R: Read, W: Write>(
+    reader: &mut R,
+    writer: &mut W,
+    app_dir: &Path,
+    session: &mut BridgeSession,
+) -> Result<(), String> {
     loop {
-        let frame = match read_frame(&mut reader) {
+        let frame = match read_frame(reader) {
             Ok(Some(frame)) => frame,
             Ok(None) => return Ok(()),
             Err(e) => {
                 // Размер кадра не прошёл проверку ещё до парсинга: nonce
                 // неизвестен, отвечаем общим отказом без содержимого.
                 let response = error_response(None, ERR_REQUEST_TOO_LARGE, e);
-                let payload =
-                    serde_json::to_vec(&response).map_err(|e| format!("response serialization failed: {e}"))?;
-                write_frame(&mut writer, &payload)?;
-                continue;
+                let payload = serde_json::to_vec(&response)
+                    .map_err(|e| format!("response serialization failed: {e}"))?;
+                write_frame(writer, &payload)?;
+                return Err("Native frame rejected: closing connection.".to_string());
             }
         };
-        if let Some(response) = handle_frame(&frame, app_dir, &mut session) {
+        if let Some(response) = handle_frame(&frame, app_dir, session) {
             let payload = serde_json::to_vec(&response)
                 .map_err(|e| format!("response serialization failed: {e}"))?;
-            write_frame(&mut writer, &payload)?;
+            write_frame(writer, &payload)?;
         }
     }
 }
@@ -264,19 +279,22 @@ fn handle_get_context(
             format!("Task text exceeds {} characters.", BRIDGE_MAX_TASK_CHARS),
         );
     }
-    // maxTokens: необязательный, 1..=3000; вне диапазона — ошибка клиента,
-    // компилятор дополнительно сам клампит значение.
+    // maxTokens: необязательный, целое 1..=3000 (как в protocol.ts); вне
+    // диапазона или дробное — ошибка клиента.
     let max_tokens = match msg.get("maxTokens") {
         None | Some(Value::Null) => None,
-        Some(Value::Number(n)) => match n.as_f64() {
-            Some(v) if v.is_finite() && (1.0..=context::CONTEXT_HARD_MAX_TOKENS as f64).contains(&v) => {
-                Some(v)
+        Some(Value::Number(n)) => match n.as_u64() {
+            Some(v) if (1..=context::CONTEXT_HARD_MAX_TOKENS as u64).contains(&v) => {
+                Some(v as f64)
             }
             _ => {
                 return error_response(
                     Some(nonce),
                     ERR_INVALID_REQUEST,
-                    "maxTokens must be between 1 and 3000.",
+                    format!(
+                        "maxTokens must be an integer between 1 and {}.",
+                        context::CONTEXT_HARD_MAX_TOKENS
+                    ),
                 )
             }
         },
@@ -667,32 +685,17 @@ mod tests {
     fn serve_loop_roundtrips_over_frames() {
         let env = TestEnv::new();
         let mut input: Vec<u8> = Vec::new();
-        let mut frames: Vec<Vec<u8>> = Vec::new();
         let ping = format!(
             r#"{{"type":"soul.ping","protocol":"{BRIDGE_PROTOCOL_VERSION}","extensionId":"{BRIDGE_EXTENSION_ID}","nonce":"serve_ping_0000000000000000"}}"#
         );
         let ctx = env.valid_request(&[("nonce", json!("serve_ctx_00000000000000000"))]);
-        frames.push(ping.into_bytes());
-        frames.push(ctx.into_bytes());
-        for frame in &frames {
+        for frame in [ping.into_bytes(), ctx.into_bytes()] {
             input.extend_from_slice(&(frame.len() as u32).to_le_bytes());
-            input.extend_from_slice(frame);
+            input.extend_from_slice(&frame);
         }
         let mut reader = Cursor::new(input);
         let mut out: Vec<u8> = Vec::new();
-        let mut session = BridgeSession::new();
-        loop {
-            let frame = read_frame(&mut reader).unwrap();
-            match frame {
-                None => break,
-                Some(frame) => {
-                    if let Some(response) = handle_frame(&frame, &env.dir, &mut session) {
-                        let payload = serde_json::to_vec(&response).unwrap();
-                        write_frame(&mut out, &payload).unwrap();
-                    }
-                }
-            }
-        }
+        serve_frames(&mut reader, &mut out, &env.dir, &mut BridgeSession::new()).unwrap();
         let mut out_reader = Cursor::new(out);
         let first = read_frame(&mut out_reader).unwrap().unwrap();
         let first_json: Value = serde_json::from_slice(&first).unwrap();
@@ -701,6 +704,38 @@ mod tests {
         let second_json: Value = serde_json::from_slice(&second).unwrap();
         assert_eq!(second_json["type"], "soul.context");
         assert!(read_frame(&mut out_reader).unwrap().is_none());
+    }
+
+    #[test]
+    fn serve_loop_closes_on_oversized_frame() {
+        let env = TestEnv::new();
+        // 0x3fffffff байт — больше лимита 1 МБ; после него поток рассинхронен.
+        let input: Vec<u8> = vec![0xff, 0xff, 0xff, 0x3f];
+        let mut reader = Cursor::new(input);
+        let mut out: Vec<u8> = Vec::new();
+        let result = serve_frames(&mut reader, &mut out, &env.dir, &mut BridgeSession::new());
+        assert!(result.is_err(), "соединение должно закрыться на oversized-кадре");
+        let mut out_reader = Cursor::new(out);
+        let first = read_frame(&mut out_reader).unwrap().unwrap();
+        let first_json: Value = serde_json::from_slice(&first).unwrap();
+        assert_eq!(first_json["type"], "soul.error");
+        assert_eq!(first_json["code"], ERR_REQUEST_TOO_LARGE);
+        assert!(read_frame(&mut out_reader).unwrap().is_none());
+    }
+
+    #[test]
+    fn fractional_max_tokens_is_rejected() {
+        let env = TestEnv::new();
+        let mut session = BridgeSession::new();
+        let res = env.send(
+            &env.valid_request(&[
+                ("maxTokens", json!(2.5)),
+                ("nonce", json!("max_frac_000000000000000000")),
+            ]),
+            &mut session,
+        );
+        assert_eq!(res["code"], ERR_INVALID_REQUEST);
+        assert!(receipt_texts(&env).is_empty());
     }
 
     /// E2E: реальный бинарь soul-bridge.exe по кадрам native messaging.
