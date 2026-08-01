@@ -6,6 +6,12 @@ import {
   clientStatusNote,
   type ClientStatus,
 } from '../data/integrations';
+import {
+  bridgeStateLabel,
+  bridgeStatusNote,
+  COMPANION_SITES,
+  type BridgeStatus,
+} from '../data/bridge';
 
 interface SoulInfo {
   soul_id: string;
@@ -126,6 +132,7 @@ export function Settings({ soul, entities, onDataChanged, onGoHome }: SettingsPr
   const [success, setSuccess] = useState<string | null>(null);
   const [receipts, setReceipts] = useState<ReceiptSummary[]>([]);
   const [clients, setClients] = useState<ClientStatus[]>([]);
+  const [bridge, setBridge] = useState<BridgeStatus | null>(null);
 
   const loadReceipts = async () => {
     try {
@@ -143,9 +150,46 @@ export function Settings({ soul, entities, onDataChanged, onGoHome }: SettingsPr
     }
   };
 
+  const loadBridge = async () => {
+    try {
+      setBridge(await invoke<BridgeStatus>('bridge_status_cmd'));
+    } catch {
+      setBridge(null);
+    }
+  };
+
+  const handleBridgeRegister = async () => {
+    setBusy('bridge');
+    setError(null);
+    setSuccess(null);
+    try {
+      setBridge(await invoke<BridgeStatus>('register_bridge_cmd'));
+      setSuccess('Browser Companion host зарегистрирован для Chrome и Edge.');
+    } catch (e) {
+      setError(String(e));
+    } finally {
+      setBusy(null);
+    }
+  };
+
+  const handleBridgeUnregister = async () => {
+    setBusy('bridge');
+    setError(null);
+    setSuccess(null);
+    try {
+      setBridge(await invoke<BridgeStatus>('unregister_bridge_cmd'));
+      setSuccess('Browser Companion host отключён: веб-чаты работают как обычно.');
+    } catch (e) {
+      setError(String(e));
+    } finally {
+      setBusy(null);
+    }
+  };
+
   useEffect(() => {
     void loadReceipts();
     void loadClients();
+    void loadBridge();
   }, []);
 
   const handleConnect = async (client: string) => {
@@ -512,6 +556,46 @@ export function Settings({ soul, entities, onDataChanged, onGoHome }: SettingsPr
             );
           })}
         </div>
+      </Section>
+
+      <Section title="Browser Companion">
+        <p style={{ fontSize: '13px', color: '#666', margin: '0 0 8px' }}>
+          Добавляет разрешённый контекст SOUL в веб-чаты {COMPANION_SITES.join(', ')} без ручного
+          копирования: контекст вставляется в то же сообщение и сворачивается в истории в чип{' '}
+          <code>SOUL context</code>. Контекст не сохраняется расширением, логами или отчётами об
+          ошибках; при изменении разметки сайта расширение отключается само (fail-closed).
+        </p>
+        <StatusRow label="Host" value={bridgeStateLabel(bridge)} />
+        <StatusRow
+          label="Notes"
+          value={bridge ? bridgeStatusNote(bridge) : 'Нажмите «Проверить».'}
+        />
+        {bridge?.binary_path ? <StatusRow label="Binary" value={bridge.binary_path} mono /> : null}
+        <div style={{ display: 'flex', gap: '8px', marginTop: '8px' }}>
+          <button onClick={handleBridgeRegister} disabled={busy !== null} style={secondaryBtnStyle}>
+            {bridge?.registered ? 'Re-register' : 'Register'}
+          </button>
+          <button
+            onClick={handleBridgeUnregister}
+            disabled={busy !== null}
+            style={secondaryBtnStyle}
+          >
+            Unregister
+          </button>
+          <button
+            onClick={() => void loadBridge()}
+            disabled={busy !== null}
+            style={secondaryBtnStyle}
+          >
+            Check
+          </button>
+        </div>
+        <p style={{ fontSize: '12px', color: '#9ca3af', margin: '8px 0 0' }}>
+          Установите расширение из <code>browser/extension</code> через{' '}
+          <code>chrome://extensions</code> (режим разработчика) или загрузите его в свой браузер.
+          После отключения host-а веб-чаты работают как обычно — расширение не изменяет их
+          поведение.
+        </p>
       </Section>
 
       <Section title="Local receipts">

@@ -23,6 +23,6 @@
       "soul-schema": ["./packages/soul-schema/src"]
     }
   },
-  "include": ["src", "tests"],
+  "include": ["src", "tests", "browser/src"],
   "references": [{ "path": "./tsconfig.node.json" }]
 }

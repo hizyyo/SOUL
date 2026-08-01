@@ -11,6 +11,10 @@ crate-type = ["lib", "cdylib", "staticlib"]
 name = "soul-mcp"
 path = "src/bin/soul_mcp.rs"
 
+[[bin]]
+name = "soul-bridge"
+path = "src/bin/soul_bridge.rs"
+
 [build-dependencies]
 tauri-build = { version = "2", features = [] }
 

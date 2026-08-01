@@ -20,6 +20,7 @@ dist/
 build/
 target/
 *.tsbuildinfo
+browser/extension/
 
 # Dependencies
 node_modules/

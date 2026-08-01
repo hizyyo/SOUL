@@ -35,6 +35,9 @@ pnpm typecheck
 
 # Линтинг
 pnpm lint
+
+# Сборка расширения Browser Companion (результат в browser/extension/)
+pnpm build:companion
 ```
 
 ## Стек

@@ -3,6 +3,8 @@ mod db;
 mod integrations;
 mod package;
 mod context;
+pub mod bridge;
+mod native_host;
 
 pub mod mcp;
 
@@ -378,6 +380,24 @@ fn rollback_client_cmd(
     integrations::rollback_client(&app_dir, client)
 }
 
+#[tauri::command]
+fn register_bridge_cmd(app: tauri::AppHandle) -> Result<native_host::BridgeStatus, String> {
+    let app_dir = app.path().app_data_dir().map_err(|e| e.to_string())?;
+    native_host::register_bridge(&app_dir)
+}
+
+#[tauri::command]
+fn unregister_bridge_cmd(app: tauri::AppHandle) -> Result<native_host::BridgeStatus, String> {
+    let app_dir = app.path().app_data_dir().map_err(|e| e.to_string())?;
+    native_host::unregister_bridge(&app_dir)
+}
+
+#[tauri::command]
+fn bridge_status_cmd(app: tauri::AppHandle) -> Result<native_host::BridgeStatus, String> {
+    let app_dir = app.path().app_data_dir().map_err(|e| e.to_string())?;
+    Ok(native_host::bridge_status(&app_dir))
+}
+
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     tauri::Builder::default()
@@ -415,6 +435,9 @@ pub fn run() {
             connect_client_cmd,
             disconnect_client_cmd,
             rollback_client_cmd,
+            register_bridge_cmd,
+            unregister_bridge_cmd,
+            bridge_status_cmd,
         ])
         .setup(|app| {
             let app_dir = app.path().app_data_dir().expect("Failed to get app data dir");

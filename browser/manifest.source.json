@@ -1,0 +1,38 @@
+{
+  "manifest_version": 3,
+  "name": "SOUL Browser Companion",
+  "version": "0.1.0",
+  "description": "Добавляет разрешённый контекст SOUL в ChatGPT Web, Gemini Web и Claude Web. Контекст не сохраняется.",
+  "key": "MIIBIjANBgkqhkiG9w0BAQEFAAOCAQ8AMIIBCgKCAQEAx//TL12FPgB1cKf4iE6/leNZbtYvVpLMM/YudxAHJ6+z65HmLsXuVu420BwnRnripssJe8riUB4afXJ+tSowKe6p2ysva6ep6ZvbNaowYU1nezaLaJQHBNwviFI2GNSOZZGldjDYB3hoXJzGNuGeyRxeEb6ncgLLgarP0znG6LRYdiTNLtRzcqCzJUhvxdKoH9Ng02p56SR8ObdDwgRUJ0fQ1s7VccSOdVrqkCEDZ8kb9if0MCuR1IAvSAoVto/Fe2y4bYmDMp+Da4a/TfnL/GliN34RWBlW8zCwkOAdattWw7Fwe4Dx9ZswUdS3qOQ42gUQFCuJEkX4dL/T1FVSEQIDAQAB",
+  "icons": {
+    "16": "icons/16.png",
+    "32": "icons/32.png",
+    "48": "icons/48.png",
+    "128": "icons/128.png"
+  },
+  "action": {
+    "default_icon": {
+      "16": "icons/16.png",
+      "32": "icons/32.png",
+      "48": "icons/48.png",
+      "128": "icons/128.png"
+    },
+    "default_title": "SOUL Browser Companion"
+  },
+  "background": {
+    "service_worker": "background.js"
+  },
+  "content_scripts": [
+    {
+      "matches": ["https://chatgpt.com/*", "https://gemini.google.com/*", "https://claude.ai/*"],
+      "js": ["content.js"],
+      "run_at": "document_idle"
+    }
+  ],
+  "permissions": ["nativeMessaging"],
+  "host_permissions": [
+    "https://chatgpt.com/*",
+    "https://gemini.google.com/*",
+    "https://claude.ai/*"
+  ]
+}
