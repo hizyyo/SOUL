@@ -1,8 +1,8 @@
-use rusqlite::{Connection, Result as SqlResult, params};
-use serde::{Deserialize, Serialize};
-use sha2::{Sha256, Digest};
-use uuid::Uuid;
 use chrono::Utc;
+use rusqlite::{params, Connection, Result as SqlResult};
+use serde::{Deserialize, Serialize};
+use sha2::{Digest, Sha256};
+use uuid::Uuid;
 
 #[derive(Debug, Serialize, Deserialize, Clone)]
 pub struct SoulManifest {
@@ -270,16 +270,13 @@ pub fn search_entities(
 
 /// Аддитивная миграция: добавляет колонку, только если её ещё нет.
 /// Позволяет открывать базы, созданные предыдущими версиями приложения.
-fn add_column_if_missing(
-    conn: &Connection,
-    table: &str,
-    column: &str,
-    ddl: &str,
-) -> SqlResult<()> {
+fn add_column_if_missing(conn: &Connection, table: &str, column: &str, ddl: &str) -> SqlResult<()> {
     let sql = format!("ALTER TABLE {table} ADD COLUMN {column} {ddl}");
     match conn.execute(&sql, []) {
         Ok(_) => Ok(()),
-        Err(rusqlite::Error::SqliteFailure(_, Some(msg))) if msg.contains("duplicate column name") => {
+        Err(rusqlite::Error::SqliteFailure(_, Some(msg)))
+            if msg.contains("duplicate column name") =>
+        {
             Ok(())
         }
         Err(other) => Err(other),
@@ -331,6 +328,7 @@ pub fn wipe_all(conn: &Connection) -> SqlResult<()> {
         "DELETE FROM entities;
          DELETE FROM events;
          DELETE FROM soul_state;
+         DELETE FROM evaluations;
          DELETE FROM souls;",
     )?;
     conn.execute_batch("PRAGMA wal_checkpoint(TRUNCATE);")?;
@@ -613,12 +611,8 @@ fn eligible_for_bulk_activation(entity: &EntityRow) -> bool {
 }
 
 pub fn is_soul_activated(conn: &Connection, soul_id: &str) -> SqlResult<bool> {
-    let mut stmt = conn.prepare(
-        "SELECT activated FROM soul_state WHERE soul_id = ?1",
-    )?;
-    let mut rows = stmt.query_map(params![soul_id], |row| {
-        Ok(row.get::<_, i32>(0)? != 0)
-    })?;
+    let mut stmt = conn.prepare("SELECT activated FROM soul_state WHERE soul_id = ?1")?;
+    let mut rows = stmt.query_map(params![soul_id], |row| Ok(row.get::<_, i32>(0)? != 0))?;
     match rows.next() {
         Some(row) => Ok(row?),
         None => Ok(false),
@@ -668,14 +662,16 @@ fn validate_status_value(status: &str) -> Result<(), String> {
 }
 
 fn validate_entity_data_json(data: &str) -> Result<(), String> {
-    let value: serde_json::Value = serde_json::from_str(data)
-        .map_err(|_| "Entity data must be valid JSON.".to_string())?;
+    let value: serde_json::Value =
+        serde_json::from_str(data).map_err(|_| "Entity data must be valid JSON.".to_string())?;
     if !value.is_object() {
         return Err("Entity data must be a JSON object.".to_string());
     }
     if let Some(claim) = value.get("claim").and_then(|c| c.as_str()) {
         if claim.chars().count() > MAX_CLAIM_CHARS {
-            return Err(format!("Entity claim is too long (limit {MAX_CLAIM_CHARS} characters)."));
+            return Err(format!(
+                "Entity claim is too long (limit {MAX_CLAIM_CHARS} characters)."
+            ));
         }
     }
     Ok(())
@@ -770,7 +766,7 @@ pub fn update_entity(
         Some(d) => {
             if !is_edit {
                 return Err(
-                    "Entity data can only be changed while editing a candidate.".to_string(),
+                    "Entity data can only be changed while editing a candidate.".to_string()
                 );
             }
             validate_entity_data_json(d)?;
@@ -780,9 +776,7 @@ pub fn update_entity(
     };
 
     if is_edit && data.is_none() {
-        return Err(
-            "Entity is already a candidate; provide new data to edit it.".to_string(),
-        );
+        return Err("Entity is already a candidate; provide new data to edit it.".to_string());
     }
 
     if data.is_some() && next_data == existing.data {
@@ -831,7 +825,11 @@ pub fn update_entity(
         .ok_or("Entity disappeared after update.".to_string())
 }
 
-pub fn create_soul(conn: &Connection, display_name: &str, device_id: &str) -> SqlResult<SoulManifest> {
+pub fn create_soul(
+    conn: &Connection,
+    display_name: &str,
+    device_id: &str,
+) -> SqlResult<SoulManifest> {
     let tx = conn.unchecked_transaction()?;
     let soul_id = format!("soul_{}", Uuid::new_v4());
     let now = Utc::now().to_rfc3339();
@@ -938,8 +936,8 @@ pub fn add_entity(
     validate_entity_data_json(data)?;
 
     if let Some(dedup_key) = dedup_key_for(data) {
-        if let Some(existing) = find_by_dedup_key(conn, soul_id, &dedup_key)
-            .map_err(|e| e.to_string())?
+        if let Some(existing) =
+            find_by_dedup_key(conn, soul_id, &dedup_key).map_err(|e| e.to_string())?
         {
             return Ok(existing);
         }
@@ -1158,11 +1156,17 @@ mod tests {
     fn confirm_activates_and_appends_chained_event() {
         let env = TestEnv::new();
         let (soul_id, ent_id) = seed(&env);
-        let head_before = get_soul(&env.conn, &soul_id).unwrap().unwrap().head_event_hash;
+        let head_before = get_soul(&env.conn, &soul_id)
+            .unwrap()
+            .unwrap()
+            .head_event_hash;
 
         let row = update_entity(&env.conn, &ent_id, "active", None, "device_t").unwrap();
         assert_eq!(row.status, "active");
-        assert_eq!(row.data, r#"{"claim":"Prefer concise","source":"calibration"}"#);
+        assert_eq!(
+            row.data,
+            r#"{"claim":"Prefer concise","source":"calibration"}"#
+        );
 
         let ops = operations(&env, &soul_id);
         assert!(ops.contains(&"entity.activated".to_string()));
@@ -1170,7 +1174,10 @@ mod tests {
         assert_ne!(soul.head_event_hash, head_before);
         assert_eq!(
             soul.head_event_hash.as_deref(),
-            list_events(&env.conn, &soul_id).unwrap().last().map(|e| e.content_hash.as_str())
+            list_events(&env.conn, &soul_id)
+                .unwrap()
+                .last()
+                .map(|e| e.content_hash.as_str())
         );
     }
 
@@ -1180,13 +1187,22 @@ mod tests {
         let (soul_id, ent_id) = seed(&env);
 
         update_entity(&env.conn, &ent_id, "rejected", None, "device_t").unwrap();
-        assert_eq!(get_entity(&env.conn, &ent_id).unwrap().unwrap().status, "rejected");
+        assert_eq!(
+            get_entity(&env.conn, &ent_id).unwrap().unwrap().status,
+            "rejected"
+        );
 
         update_entity(&env.conn, &ent_id, "candidate", None, "device_t").unwrap();
-        assert_eq!(get_entity(&env.conn, &ent_id).unwrap().unwrap().status, "candidate");
+        assert_eq!(
+            get_entity(&env.conn, &ent_id).unwrap().unwrap().status,
+            "candidate"
+        );
 
         update_entity(&env.conn, &ent_id, "active", None, "device_t").unwrap();
-        assert_eq!(get_entity(&env.conn, &ent_id).unwrap().unwrap().status, "active");
+        assert_eq!(
+            get_entity(&env.conn, &ent_id).unwrap().unwrap().status,
+            "active"
+        );
 
         let ops = operations(&env, &soul_id);
         assert!(ops.contains(&"entity.rejected".to_string()));
@@ -1202,7 +1218,10 @@ mod tests {
 
         let err = update_entity(&env.conn, &ent_id, "active", None, "device_t").unwrap_err();
         assert!(err.contains("not allowed"), "unexpected error: {err}");
-        assert_eq!(get_entity(&env.conn, &ent_id).unwrap().unwrap().status, "rejected");
+        assert_eq!(
+            get_entity(&env.conn, &ent_id).unwrap().unwrap().status,
+            "rejected"
+        );
     }
 
     #[test]
@@ -1221,9 +1240,15 @@ mod tests {
         let (_, ent_id) = seed(&env);
 
         let err = update_entity(&env.conn, &ent_id, "disputed", None, "device_t").unwrap_err();
-        assert!(err.contains("Unknown entity status"), "unexpected error: {err}");
+        assert!(
+            err.contains("Unknown entity status"),
+            "unexpected error: {err}"
+        );
         let err = update_entity(&env.conn, &ent_id, "deleted", None, "device_t").unwrap_err();
-        assert!(err.contains("Unknown entity status"), "unexpected error: {err}");
+        assert!(
+            err.contains("Unknown entity status"),
+            "unexpected error: {err}"
+        );
     }
 
     #[test]
@@ -1232,7 +1257,10 @@ mod tests {
         let (_, ent_id) = seed(&env);
 
         let row = update_entity(&env.conn, &ent_id, "active", None, "device_t").unwrap();
-        assert_eq!(row.data, r#"{"claim":"Prefer concise","source":"calibration"}"#);
+        assert_eq!(
+            row.data,
+            r#"{"claim":"Prefer concise","source":"calibration"}"#
+        );
     }
 
     #[test]
@@ -1240,8 +1268,10 @@ mod tests {
         let env = TestEnv::new();
         let (soul_id, ent_id) = seed(&env);
 
-        let new_data = r#"{"claim":"Prefer very concise answers","source":"calibration","confidence":0.9}"#;
-        let row = update_entity(&env.conn, &ent_id, "candidate", Some(new_data), "device_t").unwrap();
+        let new_data =
+            r#"{"claim":"Prefer very concise answers","source":"calibration","confidence":0.9}"#;
+        let row =
+            update_entity(&env.conn, &ent_id, "candidate", Some(new_data), "device_t").unwrap();
         assert_eq!(row.status, "candidate");
         assert_eq!(row.data, new_data);
 
@@ -1271,14 +1301,35 @@ mod tests {
         let env = TestEnv::new();
         let (_, ent_id) = seed(&env);
 
-        let err = update_entity(&env.conn, &ent_id, "candidate", Some("not json"), "device_t").unwrap_err();
+        let err = update_entity(
+            &env.conn,
+            &ent_id,
+            "candidate",
+            Some("not json"),
+            "device_t",
+        )
+        .unwrap_err();
         assert!(err.contains("valid JSON"), "unexpected error: {err}");
 
-        let err = update_entity(&env.conn, &ent_id, "candidate", Some(r#"[1,2,3]"#), "device_t").unwrap_err();
+        let err = update_entity(
+            &env.conn,
+            &ent_id,
+            "candidate",
+            Some(r#"[1,2,3]"#),
+            "device_t",
+        )
+        .unwrap_err();
         assert!(err.contains("JSON object"), "unexpected error: {err}");
 
         let long_claim = format!(r#"{{"claim":"{}"}}"#, "x".repeat(MAX_CLAIM_CHARS + 1));
-        let err = update_entity(&env.conn, &ent_id, "candidate", Some(&long_claim), "device_t").unwrap_err();
+        let err = update_entity(
+            &env.conn,
+            &ent_id,
+            "candidate",
+            Some(&long_claim),
+            "device_t",
+        )
+        .unwrap_err();
         assert!(err.contains("too long"), "unexpected error: {err}");
     }
 
@@ -1311,8 +1362,14 @@ mod tests {
         let (soul_id, ent_id) = seed(&env);
 
         let err = update_entity(&env.conn, &ent_id, "candidate", None, "device_t").unwrap_err();
-        assert!(err.contains("already a candidate"), "unexpected error: {err}");
-        assert_eq!(get_entity(&env.conn, &ent_id).unwrap().unwrap().status, "candidate");
+        assert!(
+            err.contains("already a candidate"),
+            "unexpected error: {err}"
+        );
+        assert_eq!(
+            get_entity(&env.conn, &ent_id).unwrap().unwrap().status,
+            "candidate"
+        );
         assert_eq!(operations(&env, &soul_id).len(), 2);
     }
 
@@ -1321,16 +1378,40 @@ mod tests {
         let env = TestEnv::new();
         let soul = create_soul(&env.conn, "Тест", "device_t").unwrap();
 
-        let err = add_entity(&env.conn, &soul.soul_id, "preference", "disputed", r#"{}"#, "device_t")
-            .unwrap_err();
-        assert!(err.contains("Unknown entity status"), "unexpected error: {err}");
+        let err = add_entity(
+            &env.conn,
+            &soul.soul_id,
+            "preference",
+            "disputed",
+            r#"{}"#,
+            "device_t",
+        )
+        .unwrap_err();
+        assert!(
+            err.contains("Unknown entity status"),
+            "unexpected error: {err}"
+        );
 
-        let err = add_entity(&env.conn, &soul.soul_id, "preference", "candidate", "not json", "device_t")
-            .unwrap_err();
+        let err = add_entity(
+            &env.conn,
+            &soul.soul_id,
+            "preference",
+            "candidate",
+            "not json",
+            "device_t",
+        )
+        .unwrap_err();
         assert!(err.contains("valid JSON"), "unexpected error: {err}");
 
-        let err = add_entity(&env.conn, &soul.soul_id, "preference", "candidate", r#"[1,2]"#, "device_t")
-            .unwrap_err();
+        let err = add_entity(
+            &env.conn,
+            &soul.soul_id,
+            "preference",
+            "candidate",
+            r#"[1,2]"#,
+            "device_t",
+        )
+        .unwrap_err();
         assert!(err.contains("JSON object"), "unexpected error: {err}");
     }
 
@@ -1370,7 +1451,10 @@ mod tests {
             "device_t",
         )
         .unwrap_err();
-        assert!(err.contains("Unknown entity type"), "unexpected error: {err}");
+        assert!(
+            err.contains("Unknown entity type"),
+            "unexpected error: {err}"
+        );
         let err = add_entity(
             &env.conn,
             &soul.soul_id,
@@ -1380,7 +1464,10 @@ mod tests {
             "device_t",
         )
         .unwrap_err();
-        assert!(err.contains("Unknown entity type"), "unexpected error: {err}");
+        assert!(
+            err.contains("Unknown entity type"),
+            "unexpected error: {err}"
+        );
     }
 
     #[test]
@@ -1490,8 +1577,24 @@ mod tests {
         let soul = create_soul(&env.conn, "Тест", "device_t").unwrap();
         let data = r#"{"claim":"x","questionId":"pref_1","value":"Concise"}"#;
 
-        let first = add_entity(&env.conn, &soul.soul_id, "preference", "candidate", data, "device_t").unwrap();
-        let second = add_entity(&env.conn, &soul.soul_id, "preference", "candidate", data, "device_t").unwrap();
+        let first = add_entity(
+            &env.conn,
+            &soul.soul_id,
+            "preference",
+            "candidate",
+            data,
+            "device_t",
+        )
+        .unwrap();
+        let second = add_entity(
+            &env.conn,
+            &soul.soul_id,
+            "preference",
+            "candidate",
+            data,
+            "device_t",
+        )
+        .unwrap();
 
         assert_ne!(first.id, second.id);
         assert_eq!(list_entities(&env.conn, &soul.soul_id).unwrap().len(), 2);
@@ -1571,7 +1674,9 @@ mod tests {
             .query_map([], |r| r.get::<_, String>(1))
             .unwrap()
             .collect::<Vec<_>>();
-        assert!(state_cols.iter().any(|c| c.as_deref() == Ok("preview_confirmed")));
+        assert!(state_cols
+            .iter()
+            .any(|c| c.as_deref() == Ok("preview_confirmed")));
 
         let soul = get_soul(&conn, "soul_old").unwrap().unwrap();
         assert_eq!(soul.display_name, "Старый");
@@ -1597,7 +1702,12 @@ mod tests {
             .into_iter()
             .map(|e| e.operation)
             .collect();
-        assert_eq!(ops.iter().filter(|o| o.as_str() == "soul.preview_confirmed").count(), 1);
+        assert_eq!(
+            ops.iter()
+                .filter(|o| o.as_str() == "soul.preview_confirmed")
+                .count(),
+            1
+        );
         assert!(get_soul_state(&env.conn, &soul.soul_id).unwrap().3);
     }
 
@@ -1607,7 +1717,10 @@ mod tests {
         let soul = create_soul(&env.conn, "Тест", "device_t").unwrap();
 
         let err = activate_soul(&env.conn, &soul.soul_id, "device_t").unwrap_err();
-        assert!(err.contains("preview is confirmed"), "unexpected error: {err}");
+        assert!(
+            err.contains("preview is confirmed"),
+            "unexpected error: {err}"
+        );
         assert!(!is_soul_activated(&env.conn, &soul.soul_id).unwrap());
     }
 
@@ -1635,7 +1748,11 @@ mod tests {
             let e = add_entity(
                 &env.conn,
                 &soul.soul_id,
-                if question_id.starts_with("pref_") { "preference" } else { "goal" },
+                if question_id.starts_with("pref_") {
+                    "preference"
+                } else {
+                    "goal"
+                },
                 "candidate",
                 &calibration_data(question_id, value),
                 "device_t",
@@ -1665,7 +1782,10 @@ mod tests {
         };
 
         let err = activate_preview(&env.conn, &soul_id, &ids, "device_t").unwrap_err();
-        assert!(err.contains("preview is confirmed"), "unexpected error: {err}");
+        assert!(
+            err.contains("preview is confirmed"),
+            "unexpected error: {err}"
+        );
         assert!(!is_soul_activated(&env.conn, &soul_id).unwrap());
         assert_eq!(
             get_entity(&env.conn, &ids[0]).unwrap().unwrap().status,
@@ -1690,7 +1810,9 @@ mod tests {
             .map(|e| e.operation)
             .collect();
         assert_eq!(
-            ops.iter().filter(|o| o.as_str() == "soul.preview_revoked").count(),
+            ops.iter()
+                .filter(|o| o.as_str() == "soul.preview_revoked")
+                .count(),
             1
         );
         assert!(ops.contains(&"soul.preview_confirmed".to_string()));
@@ -1704,7 +1826,10 @@ mod tests {
 
         reset_soul_preview(&env.conn, &soul_id, "device_t").unwrap();
         let err = activate_preview(&env.conn, &soul_id, &ids, "device_t").unwrap_err();
-        assert!(err.contains("preview is confirmed"), "unexpected error: {err}");
+        assert!(
+            err.contains("preview is confirmed"),
+            "unexpected error: {err}"
+        );
         assert!(!is_soul_activated(&env.conn, &soul_id).unwrap());
 
         confirm_soul_preview(&env.conn, &soul_id, "device_t").unwrap();
@@ -1740,7 +1865,12 @@ mod tests {
             .into_iter()
             .map(|e| e.operation)
             .collect();
-        assert_eq!(ops.iter().filter(|o| o.as_str() == "entity.activated").count(), 2);
+        assert_eq!(
+            ops.iter()
+                .filter(|o| o.as_str() == "entity.activated")
+                .count(),
+            2
+        );
         assert!(ops.contains(&"soul.activated".to_string()));
     }
 
@@ -1761,11 +1891,17 @@ mod tests {
         let mut with_boundary = ids.clone();
         with_boundary.push(boundary.id.clone());
         let err = activate_preview(&env.conn, &soul_id, &with_boundary, "device_t").unwrap_err();
-        assert!(err.contains("cannot be activated by preview confirmation"), "unexpected error: {err}");
+        assert!(
+            err.contains("cannot be activated by preview confirmation"),
+            "unexpected error: {err}"
+        );
 
         assert!(!is_soul_activated(&env.conn, &soul_id).unwrap());
         for id in &ids {
-            assert_eq!(get_entity(&env.conn, id).unwrap().unwrap().status, "candidate");
+            assert_eq!(
+                get_entity(&env.conn, id).unwrap().unwrap().status,
+                "candidate"
+            );
         }
     }
 
@@ -1795,12 +1931,18 @@ mod tests {
 
         ids.push(sensitive.id.clone());
         let err = activate_preview(&env.conn, &soul_id, &ids, "device_t").unwrap_err();
-        assert!(err.contains("cannot be activated by preview confirmation"), "unexpected error: {err}");
+        assert!(
+            err.contains("cannot be activated by preview confirmation"),
+            "unexpected error: {err}"
+        );
 
         let mut with_risk = vec![risk.id.clone()];
         with_risk.push(ids[0].clone());
         let err = activate_preview(&env.conn, &soul_id, &with_risk, "device_t").unwrap_err();
-        assert!(err.contains("cannot be activated by preview confirmation"), "unexpected error: {err}");
+        assert!(
+            err.contains("cannot be activated by preview confirmation"),
+            "unexpected error: {err}"
+        );
 
         assert!(!is_soul_activated(&env.conn, &soul_id).unwrap());
     }
@@ -1825,7 +1967,13 @@ mod tests {
         let err = activate_preview(&env.conn, &soul_id, &with_foreign, "device_t").unwrap_err();
         assert!(err.contains("does not belong"), "unexpected error: {err}");
 
-        let err = activate_preview(&env.conn, &soul_id, &["ent_missing".to_string()], "device_t").unwrap_err();
+        let err = activate_preview(
+            &env.conn,
+            &soul_id,
+            &["ent_missing".to_string()],
+            "device_t",
+        )
+        .unwrap_err();
         assert!(err.contains("not found"), "unexpected error: {err}");
 
         assert!(!is_soul_activated(&env.conn, &soul_id).unwrap());
@@ -1849,7 +1997,10 @@ mod tests {
         let mut with_rejected = ids.clone();
         with_rejected.push(rejected.id);
         let err = activate_preview(&env.conn, &soul_id, &with_rejected, "device_t").unwrap_err();
-        assert!(err.contains("cannot be activated by preview confirmation"), "unexpected error: {err}");
+        assert!(
+            err.contains("cannot be activated by preview confirmation"),
+            "unexpected error: {err}"
+        );
         assert!(!is_soul_activated(&env.conn, &soul_id).unwrap());
     }
 
@@ -1862,8 +2013,14 @@ mod tests {
         activate_preview(&env.conn, &soul_id, &ids, "device_t").unwrap();
 
         assert!(is_soul_activated(&env.conn, &soul_id).unwrap());
-        assert_eq!(get_entity(&env.conn, &ids[0]).unwrap().unwrap().status, "active");
-        assert_eq!(get_entity(&env.conn, &ids[1]).unwrap().unwrap().status, "active");
+        assert_eq!(
+            get_entity(&env.conn, &ids[0]).unwrap().unwrap().status,
+            "active"
+        );
+        assert_eq!(
+            get_entity(&env.conn, &ids[1]).unwrap().unwrap().status,
+            "active"
+        );
     }
 
     #[test]
@@ -1899,7 +2056,11 @@ mod tests {
         let items = [
             ("pref_1", "Concise", "Prefer concise technical answers"),
             ("pref_2", "Bullet points", "Prefer bullet points in lists"),
-            ("goal_1", "Build a product", "Primary goal is building a product"),
+            (
+                "goal_1",
+                "Build a product",
+                "Primary goal is building a product",
+            ),
         ];
         for (qid, value, claim) in items {
             add_entity(
@@ -1919,9 +2080,16 @@ mod tests {
         let env = TestEnv::new();
         let options: String = env
             .conn
-            .query_row("SELECT group_concat(compile_options, ' ') FROM pragma_compile_options", [], |r| r.get(0))
+            .query_row(
+                "SELECT group_concat(compile_options, ' ') FROM pragma_compile_options",
+                [],
+                |r| r.get(0),
+            )
             .unwrap();
-        assert!(options.contains("ENABLE_FTS5"), "FTS5 must be compiled in: {options}");
+        assert!(
+            options.contains("ENABLE_FTS5"),
+            "FTS5 must be compiled in: {options}"
+        );
     }
 
     #[test]
@@ -1948,7 +2116,11 @@ mod tests {
             &soul.soul_id,
             "preference",
             "candidate",
-            &fts_data("pref_1", "Concise", "Prefer concise concise technical answers"),
+            &fts_data(
+                "pref_1",
+                "Concise",
+                "Prefer concise concise technical answers",
+            ),
             "device_t",
         )
         .unwrap();
@@ -2009,13 +2181,22 @@ mod tests {
         let new_data = r#"{"claim":"Prefer extremely verbose prose","evidence":"Q — Long","source":"calibration","questionId":"pref_1","value":"Long","confidence":0.9}"#;
         update_entity(&env.conn, &ent.id, "candidate", Some(new_data), "device_t").unwrap();
 
-        assert!(search_entities(&env.conn, &soul.soul_id, "verbose", 10).unwrap().len() == 1);
-        assert!(search_entities(&env.conn, &soul.soul_id, "concise", 10).unwrap().is_empty());
+        assert!(
+            search_entities(&env.conn, &soul.soul_id, "verbose", 10)
+                .unwrap()
+                .len()
+                == 1
+        );
+        assert!(search_entities(&env.conn, &soul.soul_id, "concise", 10)
+            .unwrap()
+            .is_empty());
 
         env.conn
             .execute("DELETE FROM entities WHERE id = ?1", params![ent.id])
             .unwrap();
-        assert!(search_entities(&env.conn, &soul.soul_id, "verbose", 10).unwrap().is_empty());
+        assert!(search_entities(&env.conn, &soul.soul_id, "verbose", 10)
+            .unwrap()
+            .is_empty());
     }
 
     #[test]
@@ -2043,7 +2224,11 @@ mod tests {
 
         for garbage in ["", "   ", "!!!", "\"\"", "()", "AND", "-", "***", "? query"] {
             let hits = search_entities(&env.conn, &soul.soul_id, garbage, 10).unwrap();
-            assert_eq!(hits.len(), 0, "garbage query {garbage:?} must return nothing");
+            assert_eq!(
+                hits.len(),
+                0,
+                "garbage query {garbage:?} must return nothing"
+            );
         }
     }
 

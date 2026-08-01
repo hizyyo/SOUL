@@ -144,9 +144,15 @@ fn validate_create(
     if soul_answer.trim().is_empty() || baseline_answer.trim().is_empty() {
         return Err("Both variant answers must not be empty.".to_string());
     }
-    for (name, text) in [("soul_answer", soul_answer), ("baseline_answer", baseline_answer)] {
+    for (name, text) in [
+        ("soul_answer", soul_answer),
+        ("baseline_answer", baseline_answer),
+    ] {
         if text.chars().count() > MAX_VARIANT_ANSWER_CHARS {
-            return Err(format!("{name} exceeds {} characters.", MAX_VARIANT_ANSWER_CHARS));
+            return Err(format!(
+                "{name} exceeds {} characters.",
+                MAX_VARIANT_ANSWER_CHARS
+            ));
         }
     }
     if context_entity_ids.len() > MAX_CONTEXT_ENTITY_IDS {
@@ -378,7 +384,10 @@ pub fn list_evaluations(conn: &Connection, soul_id: &str) -> Result<Vec<Evaluati
 
 pub fn delete_evaluation(conn: &Connection, evaluation_id: &str) -> Result<(), String> {
     let n = conn
-        .execute("DELETE FROM evaluations WHERE id = ?1", params![evaluation_id])
+        .execute(
+            "DELETE FROM evaluations WHERE id = ?1",
+            params![evaluation_id],
+        )
         .map_err(|e| format!("evaluation delete failed: {e}"))?;
     if n == 0 {
         return Err("Evaluation not found.".to_string());
@@ -450,7 +459,10 @@ mod tests {
         assert!(row.soul_variant == "a" || row.soul_variant == "b");
         assert_eq!(row.user_choice, None);
         assert_eq!(row.completed_at, None);
-        assert_eq!(row.context_entity_ids, vec!["ent_1".to_string(), "ent_2".to_string()]);
+        assert_eq!(
+            row.context_entity_ids,
+            vec!["ent_1".to_string(), "ent_2".to_string()]
+        );
         assert_eq!(row.context_pack, "SOUL CONTEXT\n...");
         assert!(!row.created_at.is_empty());
 
@@ -485,23 +497,56 @@ mod tests {
         let soul_id = seed_soul(&env);
         let (sid, scen, domain, soul_a, base_a, _) = base_args(&soul_id);
         let err = create_evaluation(
-            &env.conn, sid, scen, "Q?", domain, "   ", base_a, "", "", &[],
+            &env.conn,
+            sid,
+            scen,
+            "Q?",
+            domain,
+            "   ",
+            base_a,
+            "",
+            "",
+            &[],
         )
         .unwrap_err();
         assert!(err.contains("must not be empty"), "unexpected error: {err}");
 
         let huge = "x".repeat(MAX_VARIANT_ANSWER_CHARS + 1);
         let err = create_evaluation(
-            &env.conn, sid, scen, "Q?", domain, &huge, base_a, "", "", &[],
+            &env.conn,
+            sid,
+            scen,
+            "Q?",
+            domain,
+            &huge,
+            base_a,
+            "",
+            "",
+            &[],
         )
         .unwrap_err();
-        assert!(err.contains("soul_answer exceeds"), "unexpected error: {err}");
+        assert!(
+            err.contains("soul_answer exceeds"),
+            "unexpected error: {err}"
+        );
 
         let err = create_evaluation(
-            &env.conn, sid, scen, "Q?", domain, soul_a, &huge, "", "", &[],
+            &env.conn,
+            sid,
+            scen,
+            "Q?",
+            domain,
+            soul_a,
+            &huge,
+            "",
+            "",
+            &[],
         )
         .unwrap_err();
-        assert!(err.contains("baseline_answer exceeds"), "unexpected error: {err}");
+        assert!(
+            err.contains("baseline_answer exceeds"),
+            "unexpected error: {err}"
+        );
 
         let err = create_evaluation(
             &env.conn,
@@ -516,7 +561,10 @@ mod tests {
             &[],
         )
         .unwrap_err();
-        assert!(err.contains("context_pack exceeds"), "unexpected error: {err}");
+        assert!(
+            err.contains("context_pack exceeds"),
+            "unexpected error: {err}"
+        );
     }
 
     #[test]
@@ -541,17 +589,16 @@ mod tests {
         let env = TestEnv::new();
         let soul_id = seed_soul(&env);
         let (sid, scen, domain, soul_a, base_a, _) = base_args(&soul_id);
-        let row = create_evaluation_with_slot(
-            &env.conn, sid, scen, "Q?", domain, soul_a, base_a, "a",
+        let row =
+            create_evaluation_with_slot(&env.conn, sid, scen, "Q?", domain, soul_a, base_a, "a");
+        let done = submit_choice(&env.conn, &row.id, "a").unwrap();
+        assert_eq!(done.user_choice.as_deref(), Some("a"));
+        assert!(done.completed_at.is_some());
+        assert_eq!(done.soul_variant, "a");
+        assert!(
+            done.user_choice.as_deref() == Some(done.soul_variant.as_str()),
+            "choice 'a' with slot 'a' means the SOUL variant won"
         );
-    let done = submit_choice(&env.conn, &row.id, "a").unwrap();
-    assert_eq!(done.user_choice.as_deref(), Some("a"));
-    assert!(done.completed_at.is_some());
-    assert_eq!(done.soul_variant, "a");
-    assert!(
-        done.user_choice.as_deref() == Some(done.soul_variant.as_str()),
-        "choice 'a' with slot 'a' means the SOUL variant won"
-    );
     }
 
     #[test]
@@ -559,9 +606,8 @@ mod tests {
         let env = TestEnv::new();
         let soul_id = seed_soul(&env);
         let (sid, scen, domain, soul_a, base_a, _) = base_args(&soul_id);
-        let row = create_evaluation_with_slot(
-            &env.conn, sid, scen, "Q?", domain, soul_a, base_a, "b",
-        );
+        let row =
+            create_evaluation_with_slot(&env.conn, sid, scen, "Q?", domain, soul_a, base_a, "b");
 
         let err = submit_choice(&env.conn, &row.id, "x").unwrap_err();
         assert!(err.contains("choice must be"), "unexpected error: {err}");
@@ -584,10 +630,13 @@ mod tests {
     fn list_filters_by_soul_and_orders_newest_first() {
         let env = TestEnv::new();
         let soul_a = seed_soul(&env);
-        let soul_b = create_soul(&env.conn, "Другая", "device_e").unwrap().soul_id;
+        let soul_b = create_soul(&env.conn, "Другая", "device_e")
+            .unwrap()
+            .soul_id;
         let (sid, scen, domain, s_a, b_a, _) = base_args(&soul_a);
         let first = create_evaluation_with_slot(&env.conn, sid, scen, "Q1?", domain, s_a, b_a, "a");
-        let second = create_evaluation_with_slot(&env.conn, sid, scen, "Q2?", domain, s_a, b_a, "b");
+        let second =
+            create_evaluation_with_slot(&env.conn, sid, scen, "Q2?", domain, s_a, b_a, "b");
         create_evaluation_with_slot(&env.conn, &soul_b, scen, "Q3?", domain, s_a, b_a, "a");
 
         let list = list_evaluations(&env.conn, &soul_a).unwrap();
@@ -609,5 +658,17 @@ mod tests {
 
         let err = delete_evaluation(&env.conn, &row.id).unwrap_err();
         assert!(err.contains("not found"), "unexpected error: {err}");
+    }
+
+    #[test]
+    fn wipe_all_clears_evaluations_with_soul() {
+        let env = TestEnv::new();
+        let soul_id = seed_soul(&env);
+        let (sid, scen, domain, s_a, b_a, _) = base_args(&soul_id);
+        create_evaluation_with_slot(&env.conn, sid, scen, "Q?", domain, s_a, b_a, "a");
+        assert_eq!(list_evaluations(&env.conn, &soul_id).unwrap().len(), 1);
+
+        crate::db::wipe_all(&env.conn).unwrap();
+        assert!(list_evaluations(&env.conn, &soul_id).unwrap().is_empty());
     }
 }

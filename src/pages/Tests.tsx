@@ -207,6 +207,7 @@ export function Tests({ soul, entities }: Props) {
         contextEntityIds: pack.items.map((i) => i.id),
       });
       setActiveRecord(created);
+      setRecords((prev) => [created, ...prev]);
       setPhase('choice');
     } catch (e) {
       setError(String(e));
@@ -226,7 +227,10 @@ export function Tests({ soul, entities }: Props) {
       });
       setReveal(revealFor(done, choice));
       setActiveRecord(done);
-      setRecords((prev) => prev.map((r) => (r.id === done.id ? done : r)));
+      setRecords((prev) => {
+        const rest = prev.filter((r) => r.id !== done.id);
+        return [done, ...rest];
+      });
       setPhase('reveal');
     } catch (e) {
       setError(String(e));
@@ -263,8 +267,8 @@ export function Tests({ soul, entities }: Props) {
     <div>
       <h2 style={{ marginTop: 0 }}>Blind Tests</h2>
       <p style={{ color: '#555', fontSize: '14px', marginTop: '-8px' }}>
-        Which answer is more like you? Generate two answers in your own AI client â€” one with SOUL
-        context, one with a short profile â€” and pick without knowing which is which.
+        Which answer is more like you? Generate two answers in your own AI client — one with SOUL
+        context, one with a short profile — and pick without knowing which is which.
       </p>
 
       {error && (
@@ -293,8 +297,8 @@ export function Tests({ soul, entities }: Props) {
             </span>
           </div>
           <div style={{ fontSize: '13px', color: '#555', marginTop: '4px' }}>
-            {stats.wins} wins Â· {stats.losses} losses Â· {stats.ties} neither Â·{' '}
-            <span title="95% Wilson confidence interval">95% CI {stats.confidenceLabel}</span> Â· p{' '}
+            {stats.wins} wins · {stats.losses} losses · {stats.ties} neither ·{' '}
+            <span title="95% Wilson confidence interval">95% CI {stats.confidenceLabel}</span> · p{' '}
             {stats.pValueLabel}
           </div>
         </div>
@@ -323,8 +327,8 @@ export function Tests({ soul, entities }: Props) {
         <div style={CARD}>
           <strong>Activate your SOUL first.</strong>{' '}
           <span style={{ color: '#555' }}>
-            Blind tests compare SOUL context against a baseline â€” activate SOUL in the Preview
-            step to enable rounds.
+            Blind tests compare SOUL context against a baseline — activate SOUL in the Preview step
+            to enable rounds.
           </span>
         </div>
       )}
@@ -338,7 +342,7 @@ export function Tests({ soul, entities }: Props) {
             </button>
             {activeEntities.length < 3 && (
               <span style={{ fontSize: '12px', color: '#b45309' }}>
-                Fewer than 3 active entities â€” rounds will be weak. Confirm candidates in Inbox.
+                Fewer than 3 active entities — rounds will be weak. Confirm candidates in Inbox.
               </span>
             )}
           </div>
@@ -387,17 +391,17 @@ export function Tests({ soul, entities }: Props) {
           >
             <strong>Generate two answers</strong>
             <button style={BTN_SECONDARY} onClick={() => setPhase('pick')}>
-              â† Change scenario
+              ← Change scenario
             </button>
           </div>
           <div style={{ fontSize: '13px', color: '#444', marginBottom: '12px' }}>
             <strong>Scenario:</strong> {scenario.question}
             <div style={{ marginTop: '4px', color: '#888', fontSize: '12px' }}>
-              Pack for the SOUL prompt: {pack.items.length} entities Â· ~{pack.tokenEstimate} tokens
-              {' Â· '}
+              Pack for the SOUL prompt: {pack.items.length} entities · ~{pack.tokenEstimate} tokens
+              {' · '}
               <span style={{ color: pack.items.length === 0 ? '#b45309' : '#888' }}>
                 {pack.items.length === 0
-                  ? 'no matching entities â€” consider a scenario from a domain you know'
+                  ? 'no matching entities — consider a scenario from a domain you know'
                   : `${pack.items
                       .map((i) => i.entityType)
                       .filter((v, i, a) => a.indexOf(v) === i)
@@ -407,7 +411,7 @@ export function Tests({ soul, entities }: Props) {
           </div>
           <div style={{ display: 'flex', gap: '12px', flexWrap: 'wrap' }}>
             <div style={{ ...CARD, flex: 1, minWidth: '280px', marginBottom: 0 }}>
-              <div style={{ ...LABEL, color: '#4f46e5' }}>Prompt 1 â€” with SOUL context</div>
+              <div style={{ ...LABEL, color: '#4f46e5' }}>Prompt 1 — with SOUL context</div>
               <pre
                 style={{
                   whiteSpace: 'pre-wrap',
@@ -429,7 +433,7 @@ export function Tests({ soul, entities }: Props) {
               </div>
             </div>
             <div style={{ ...CARD, flex: 1, minWidth: '280px', marginBottom: 0 }}>
-              <div style={{ ...LABEL, color: '#4f46e5' }}>Prompt 2 â€” with baseline profile</div>
+              <div style={{ ...LABEL, color: '#4f46e5' }}>Prompt 2 — with baseline profile</div>
               <pre
                 style={{
                   whiteSpace: 'pre-wrap',
@@ -462,7 +466,7 @@ export function Tests({ soul, entities }: Props) {
             client, and paste both answers below.
           </p>
           <button style={{ ...BTN, marginTop: '8px' }} onClick={() => setPhase('answers')}>
-            I have both answers â†’
+            I have both answers →
           </button>
         </div>
       )}
@@ -495,7 +499,7 @@ export function Tests({ soul, entities }: Props) {
               Submit round
             </button>
             <button style={BTN_SECONDARY} disabled={busy} onClick={() => setPhase('prompts')}>
-              â† Back
+              ← Back
             </button>
           </div>
         </div>
@@ -573,7 +577,7 @@ export function Tests({ soul, entities }: Props) {
           </div>
           <div style={{ display: 'flex', gap: '8px' }}>
             <button style={BTN} onClick={() => setPhase('pick')}>
-              Next round â†’
+              Next round →
             </button>
             <button style={BTN_SECONDARY} onClick={handleRandom}>
               Random scenario
@@ -649,7 +653,7 @@ export function Tests({ soul, entities }: Props) {
         <div style={CARD}>
           <strong>Share card</strong>
           <p style={{ fontSize: '12px', color: '#888', margin: '4px 0 8px' }}>
-            No private questions or answers inside â€” only aggregates.
+            No private questions or answers inside — only aggregates.
           </p>
           <pre
             style={{

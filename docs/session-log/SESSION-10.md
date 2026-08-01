@@ -62,8 +62,9 @@
 
 ## Запущенные тесты
 
-- `cargo test --lib`: **PASS** — 139 passed (включая 9 новых eval).
+- `cargo test --lib`: **PASS** — 140 passed (включая 9 новых eval + регресс-тест wipe).
 - `cargo clippy --all-targets`: **PASS** — без предупреждений.
+- `cargo fmt --check`: **PASS** — репозиторий приведён к rustfmt (был грязный с SESSION-03, отдельный style-коммит).
 - `pnpm test`: **PASS** — 194 passed (включая 18 новых eval).
 - `pnpm typecheck`: **PASS**.
 - `pnpm lint`: **PASS**.
@@ -76,7 +77,7 @@
 - **Никакого содержимого наружу**: раунды хранятся только локально в `soul.db`; share-карта содержит только агрегаты (wins/losses/ties, win rate, CI, p) — без вопросов, ответов, профиля и паков; публикация блокируется до 20 завершённых раундов.
 - **Защита размера**: лимиты на ответы (20 КБ), сценарий (4 КБ), профиль (4 КБ), пак (60 КБ), число id сущностей (1000) — исключают раздувание локальной БД из IPC.
 - **B1 не утекает в SOUL-промпт**: `baselinePromptFor` не содержит пак; `soulPromptFor` не содержит профиль.
-- **Экспорт/импорт/удаление души**: `delete_soul_cmd` (SESSION-03) удаляет только таблицы souls/events/entities/soul_state — `evaluations` остаётся. **Известное ограничение**: после удаления души её раунды остаются в БД как orphan-записи (list по другой душе их не покажет; delete раундов недоступен без UI-фильтра по душе). Доработка — в review-pass.
+- **Экспорт/импорт/удаление души**: `wipe_local_data` (delete_soul_cmd, SESSION-03) дополнительно удаляет `evaluations` — раунды удаляются вместе с душой (исправлено в review-pass, см. ниже; регресс-тест `wipe_all_clears_evaluations_with_soul`).
 
 ## Влияние на производительность и токены
 
@@ -94,3 +95,32 @@
 ## Коммит
 
 - `9a4b7e4` `feat(soul): blind preference test with host-assigned slots and B1 baseline [session-10]`
+- `ddb6baa` `docs(soul): record session-10 commit hash in session log [session-10]`
+
+## Review-pass
+
+Проверка коммита `9a4b7e4` (правила code-reviewer: universal + rust + typescript).
+
+### Найденные и исправленные проблемы
+
+1. **Orphan-раунды при удалении души** (высокая): `wipe_all` (db.rs) удалял только `entities/events/soul_state/souls`; `evaluations.soul_id` — FK без `ON DELETE CASCADE`, поэтому после `delete_soul_cmd` раунды оставались в БД навсегда (каталог receipts не затрагивается — удаление вообще ничего не удаляло из `evaluations`). Исправлено: `DELETE FROM evaluations` добавлен в `wipe_all`; регресс-тест `wipe_all_clears_evaluations_with_soul` (eval.rs).
+2. **Статистика и история не обновлялись после раунда** (средняя): созданный раунд не добавлялся в `records`, а `handleChoice` только мапил существующие записи — панель «Rounds: N/20», win rate и история были stale до перезагрузки приложения или Delete. Исправлено в Tests.tsx: `handleSubmitAnswers` добавляет созданный раунд в `records`, `handleChoice` обновляет позицию в списке.
+3. **Mojibake в UI-текстах Tests.tsx** (низкая): эм-дэш `—`, `·`, `←`/`→` были записаны двойной перекодировкой UTF-8 (`â€”`, `Â·`, `â†`+U+0090 и т.п.) — текст отображался кракозябрами. Исправлены байты на правильные символы.
+
+### Проверено и признано чистым
+
+- SQL — только параметризованные запросы (`params!`), никакой интерполяции.
+- Нет `unsafe`, нет `unwrap()` в продакшн-коде (тестовые `.unwrap()` в `#[cfg(test)]`), clippy чистый.
+- Слепота протокола: слот назначается в Rust (`thread_rng`), выбор финализируется (`user_choice` NOT NULL после submit), повторная подача невозможна; раскрытие/статистика считаются от сохранённого слота.
+- Статистика: точный двусторонний бином для p0 = 0.5 корректен (симметрия распределения), Wilson без continuity correction по формуле §6.6, контрольный вектор 35/44 → 65.5%–88.8% воспроизводится.
+- Share-карта содержит только агрегаты; localStorage B1-профиль не попадает ни в SOUL-промпт, ни в share.
+- Rust: `chars().count()` для лимитов (не байты), JSON-колонки читаются через `unwrap_or_default` (грациозно), нет гонок: `AppState.conn` под `Mutex`, Tauri-команды сериализуются.
+
+### Прочее
+
+- `cargo fmt` по всему репозиторию (файлы со времён SESSION-03 не проходили rustfmt) — отдельный style-коммит, без изменения поведения; `cargo fmt --check` теперь чистый.
+
+## Коммиты review-pass
+
+- `11c78d0` `style(soul): apply rustfmt repo-wide [session-10]`
+- `01a9cc7` `fix(soul): review-pass session-10 — wipe cascades to evaluations, live stats refresh, mojibake cleanup [session-10]`
