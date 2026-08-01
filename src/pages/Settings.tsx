@@ -489,7 +489,7 @@ export function Settings({ soul, entities, onDataChanged, onGoHome }: SettingsPr
                 </div>
                 <button
                   onClick={() => handleConnect(id)}
-                  disabled={busy !== null || !status.config_exists || !!status.error}
+                  disabled={busy !== null || !!status.error}
                   style={secondaryBtnStyle}
                 >
                   Connect

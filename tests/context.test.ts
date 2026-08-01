@@ -6,6 +6,7 @@ import {
   dedupeSuperseded,
   estimateTokens,
   collectDomains,
+  relevanceOf,
   CONTEXT_STANDARD_TOKENS,
   CONTEXT_HARD_MAX_TOKENS,
   type ContextEntity,
@@ -411,12 +412,17 @@ describe('cross-language golden layout (mirrors src-tauri/src/context.rs)', () =
 });
 
 describe('helpers', () => {
-
   it('collectDomains gathers unique sorted domains', () => {
     const a = entityData(dataFor({ scope: { domains: ['goals'], projects: [], people: [], channels: [] } }));
     const b = entityData(dataFor({ scope: { domains: ['preferences'], projects: [], people: [], channels: [] } }));
     const c = entityData(dataFor({ scope: { domains: ['goals'], projects: [], people: [], channels: [] } }));
     expect(collectDomains([a, b, c])).toEqual(['goals', 'preferences']);
+  });
+
+  it('relevance dedupes query terms like the Rust port (Set semantics)', () => {
+    const e = entityData(dataFor({ claim: 'Prefers concise answers' }));
+    expect(relevanceOf(e, 'concise')).toBe(2);
+    expect(relevanceOf(e, 'concise concise')).toBe(2);
   });
 
   it('default query allows internal sensitivity and active status', () => {

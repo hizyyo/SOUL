@@ -260,11 +260,15 @@ fn tokenize(text: &str) -> Vec<String> {
 
 /// Релевантность сущности запросу: термин в claim ×2, в evidence ×1.
 /// Пустой запрос — релевантность 0 для всех (пак собирается без текста).
+/// Термы запроса дедуплицируются (как Set в TS): повтор слова в запросе не
+/// удваивает счёт — иначе счёт и порядок отличались бы от TS-копии.
 pub fn relevance_of(entity: &ContextEntity, query_text: &str) -> i64 {
     if query_text.trim().is_empty() {
         return 0;
     }
-    let terms = tokenize(query_text);
+    let mut terms = tokenize(query_text);
+    terms.sort();
+    terms.dedup();
     if terms.is_empty() {
         return 0;
     }
@@ -945,8 +949,7 @@ mod tests {
     }
 
     #[test]
-    fn text_query_filters_by_relevance() {
-        let match_claim = entity(
+    fn text_query_filters_by_relevance() {        let match_claim = entity(
             "ent_a",
             "preference",
             "active",
@@ -971,6 +974,24 @@ mod tests {
         );
         assert_eq!(pack.items.len(), 1);
         assert_eq!(pack.items[0].id, "ent_a");
+    }
+
+    #[test]
+    fn relevance_dedupes_query_terms_like_ts_set() {
+        // TS токенизирует запрос в Set — повтор слова не удваивает счёт.
+        // Rust обязан давать тот же счёт (и тот же порядок сортировки).
+        let match_claim = entity(
+            "ent_a",
+            "preference",
+            "active",
+            r#"{"claim":"Prefers concise answers","questionId":"pref_1","value":"x","confidence":0.9,"sensitivity":"internal","scope":{"domains":[],"projects":[],"people":[],"channels":[]}}"#,
+            "2026-01-01T00:00:00Z",
+            "2026-01-01T00:00:00Z",
+        );
+        let single = relevance_of(&match_claim, "concise");
+        let repeated = relevance_of(&match_claim, "concise concise");
+        assert_eq!(single, repeated);
+        assert_eq!(single, 2, "термин в claim = ×2");
     }
 
     #[test]

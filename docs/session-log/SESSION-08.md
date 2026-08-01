@@ -76,12 +76,23 @@
 
 **Меры**: реализация разбита на тестируемые `*_for(home, ...)` варианты; тесты работают только с temp-home; публичные обёртки читают `home_dir` один раз. Впредь никакой тест не имеет доступа к реальной конфигурации пользователя.
 
+## Review pass (после сдачи)
+
+Повторное ревью всех изменений сессии выявило и исправило:
+
+- **Мусорная БД в рабочей папке** (найдено ультра-ревью): заготовка `AppState` в `lib.rs` выполняла `init_db(".")` до `.setup()` — при каждом запуске в CWD создавалась `soul.db` (49 КБ), которую потом перезаписывал реальный коннект из `app_data_dir`. Исправлено: заглушка — in-memory коннект без обращения к диску; реальная БД создаётся только в `setup()`/`init_app`. Мусорный файл удалён, повторно не создаётся.
+- **Rollback при сбое записи после connect**: если `write_state` падал после успешного изменения конфига, состояние (backup, хэш) не откатывалось — теперь `rollback_connect()` + удаление backup + ошибка «Cannot persist integration state; config rolled back».
+- **Rollback при отсутствовавшем ранее конфиге**: если файла не было до подключения (`original_hash == sha256("")`), rollback писал пустой файл — теперь файл удаляется; проверка ветки — `!config_path.exists()`.
+- **Счётчик на Home не обновлялся**: `loadConnectedClients` в App.tsx вызывался только при входе во вкладку Settings — теперь при любой смене таба.
+- **E2E-тест реального бинаря** `real_binary_serves_context_over_stdio` (mcp.rs): спавнит настоящий `soul-mcp.exe` (skip, если не собран), initialize → `tools/call soul.get_context` по stdio, проверяет пак («entities: 2», «Prefers concise answers», «Never share medical data») и disclosure-квитанцию в `receipts/`, завершение по EOF. Первый прогон показал ошибочное ожидание теста (`split("entity")`), не баг рантайма — ожидание заменено на contains-проверки.
+- Мёртвые команды не обнаружены: `init_app` используется фронтендом; `activate_soul_cmd` зарегистрирован, но фронтенд его не вызывает (оставлен как API).
+
 ## Тесты и проверки
 
-- `cargo test`: PASS — 99/99 (context 15, mcp 12, integrations 10, плюс прежние).
+- `cargo test`: PASS — 104/104 (context 15, mcp 13 (+E2E), integrations 11 (+rollback без файла), плюс прежние).
 - `cargo clippy --all-targets`: без предупреждений.
-- `pnpm test`: PASS — 115/115 (+13 integrations, +1 кросс-языковой golden, control обновлён).
-- `pnpm typecheck`, `pnpm lint`, `pnpm format`, `pnpm build`: PASS.
+- `pnpm test`: PASS — 116/116 (+13 integrations, +2 кросс-языковых golden/дедуп, control обновлён).
+- `pnpm typecheck`, `pnpm lint`, `pnpm build`: PASS.
 - Кросс-языковой golden: один и тот же фикстурный пак в Rust и TS даёт байт-в-байт одинаковый serialized, `state: 5b38f537`, `tokens: 110 of 900`, `token_estimate == 110`.
 
 ## Проверка безопасности
@@ -109,4 +120,5 @@
 ## Коммиты
 
 - `ed692de` — `feat(soul): local MCP server, context compiler port and AI client integrations [session-08]`
-- `f3c5c1f` — `docs(soul): record session-08 commit hash in session log [session-08]`
+- `f3c5c1f` — `docs(soul): record session-08 commit hash in session log [session-08]` (повторён в `90150a7`)
+- `6f240d9` — `fix(soul): review-pass - no stray db in cwd, rollback without prior config, write_state rollback, binary e2e test, connected clients refresh [session-08]`

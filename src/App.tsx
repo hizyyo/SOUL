@@ -151,7 +151,7 @@ export function App() {
   }, []);
 
   useEffect(() => {
-    if (tab === 'settings') void loadConnectedClients();
+    void loadConnectedClients();
   }, [tab]);
 
   const refreshEntities = async (soulId: string) => {

@@ -385,8 +385,8 @@ pub fn run() {
         .plugin(tauri_plugin_dialog::init())
         .manage(AppState {
             conn: Mutex::new(
-                init_db(&std::path::PathBuf::from("."))
-                    .expect("Failed to initialize database"),
+                rusqlite::Connection::open_in_memory()
+                    .expect("Failed to open placeholder database"),
             ),
         })
         .invoke_handler(tauri::generate_handler![

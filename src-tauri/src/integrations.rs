@@ -463,6 +463,10 @@ pub fn connect_client_for(
         Uuid::new_v4(),
         chrono::Utc::now().format("%Y%m%d%H%M%S")
     ));
+    // Каталог конфига может отсутствовать (Cursor без ~/.cursor, Codex без
+    // ~/.codex) — создаём его до записи backup, иначе connect падает раньше
+    // атомарной записи, которая создала бы каталог сама.
+    std::fs::create_dir_all(&dir).map_err(|e| format!("Cannot create config directory: {e}"))?;
     std::fs::write(&backup_path, &original).map_err(|e| format!("Cannot write backup: {e}"))?;
 
     let modified = match client {
@@ -473,18 +477,26 @@ pub fn connect_client_for(
 
     // Проверка результата: запись реально применилась.
     let read_back = std::fs::read_to_string(&config_path).map_err(|e| format!("Cannot verify config: {e}"))?;
+    let rollback_connect = || {
+        if original.is_empty() {
+            // Файла до подключения не было — не оставляем пустышку.
+            let _ = std::fs::remove_file(&config_path);
+        } else {
+            let _ = atomic_write(&config_path, &original);
+        }
+    };
     match soul_command(&read_back, client) {
         Ok(Some(cmd)) if cmd == binary.to_string_lossy() => {}
         Ok(Some(_)) => {
-            let _ = atomic_write(&config_path, &original);
+            rollback_connect();
             return Err("Verification failed after connect; config rolled back.".to_string());
         }
         Ok(None) => {
-            let _ = atomic_write(&config_path, &original);
+            rollback_connect();
             return Err("soul entry missing after connect; config rolled back.".to_string());
         }
         Err(e) => {
-            let _ = atomic_write(&config_path, &original);
+            rollback_connect();
             return Err(format!("Config unreadable after connect; rolled back: {e}"));
         }
     }
@@ -497,7 +509,13 @@ pub fn connect_client_for(
         written_hash: sha256(&modified),
         connected_at: chrono::Utc::now().to_rfc3339(),
     };
-    write_state(app_dir, &state)?;
+    // Состояние — последний шаг: если его не удалось записать, откатываем
+    // конфиг (иначе клиент «подключён», а UI не знает об этом) и убираем backup.
+    if let Err(e) = write_state(app_dir, &state) {
+        rollback_connect();
+        let _ = std::fs::remove_file(&backup_path);
+        return Err(format!("Cannot persist integration state; config rolled back: {e}"));
+    }
 
     Ok(detect_client(app_dir, binary, client, home))
 }
@@ -527,8 +545,14 @@ pub fn disconnect_client_for(
     // хирургически убираем только запись SOUL.
     let restored = if sha256(&current) == state.written_hash {
         if state.original_hash == sha256("") {
-            // Файла до подключения не было — убираем его целиком.
-            std::fs::remove_file(&config_path).ok();
+            // Файла до подключения не было — убираем его целиком. Проверка
+            // ниже для этого случая: файла нет, записи soul нет.
+            std::fs::remove_file(&config_path).map_err(|e| format!("Cannot remove config: {e}"))?;
+            if config_path.exists() {
+                return Err("Config still present after disconnect. Use Rollback.".to_string());
+            }
+            remove_state(app_dir, client);
+            return Ok(detect_client(app_dir, &server_binary_path(), client, home));
         } else {
             let original = std::fs::read_to_string(&state.backup_path)
                 .map_err(|e| format!("Cannot read backup: {e}"))?;
@@ -584,12 +608,26 @@ pub fn rollback_client_for(
     let config_path = PathBuf::from(&state.config_path);
     let original = std::fs::read_to_string(&state.backup_path)
         .map_err(|e| format!("Cannot read backup: {e}"))?;
-    atomic_write(&config_path, &original)?;
+    if state.original_hash == sha256("") {
+        // Файла до подключения не было — rollback убирает его, а не создаёт
+        // пустышку (как при отключении).
+        std::fs::remove_file(&config_path).map_err(|e| format!("Cannot remove config: {e}"))?;
+    } else {
+        atomic_write(&config_path, &original)?;
+    }
 
-    // Проверка после rollback.
-    let read_back =
-        std::fs::read_to_string(&config_path).map_err(|e| format!("Cannot verify config: {e}"))?;
-    soul_command(&read_back, client).map_err(|e| format!("Rollback result is unreadable: {e}"))?;
+    // Проверка после rollback: файла нет (был создан нами) или читается и
+    // содержит запись, которую можно разобрать.
+    if state.original_hash == sha256("") {
+        if config_path.exists() {
+            return Err("Config still present after rollback.".to_string());
+        }
+    } else {
+        let read_back = std::fs::read_to_string(&config_path)
+            .map_err(|e| format!("Cannot verify config: {e}"))?;
+        soul_command(&read_back, client)
+            .map_err(|e| format!("Rollback result is unreadable: {e}"))?;
+    }
 
     remove_state(app_dir, client);
     Ok(detect_client(app_dir, &server_binary_path(), client, home))
@@ -734,6 +772,42 @@ mod tests {
     }
 
     #[test]
+    fn connect_creates_missing_config_directory() {
+        // Cursor/Codex: каталог конфига (~/.cursor, ~/.codex) может отсутствовать
+        // целиком — connect должен создавать его, а не падать на backup.
+        let env = TestEnv::new();
+        connect(&env, ClientId::Cursor).unwrap();
+        let p = client_config_path(ClientId::Cursor, &env.home);
+        assert!(p.exists());
+        let v: serde_json::Value =
+            serde_json::from_str(&fs::read_to_string(p).unwrap()).unwrap();
+        assert_eq!(v["mcpServers"]["soul"]["command"], binary_str(&env));
+
+        let env2 = TestEnv::new();
+        connect(&env2, ClientId::Codex).unwrap();
+        let p = client_config_path(ClientId::Codex, &env2.home);
+        assert!(p.exists());
+        let text = fs::read_to_string(p).unwrap();
+        assert!(text.contains("[mcp_servers.soul]"));
+    }
+
+    #[test]
+    fn disconnect_removes_config_that_did_not_exist_before() {
+        // Файла до подключения не было — disconnect убирает файл целиком и
+        // не ошибается на повторной проверке (регрессия: раньше падал с
+        // "Cannot verify config").
+        let env = TestEnv::new();
+        connect(&env, ClientId::Cursor).unwrap();
+        assert!(connected(&env, ClientId::Cursor));
+
+        disconnect(&env, ClientId::Cursor).unwrap();
+        let p = client_config_path(ClientId::Cursor, &env.home);
+        assert!(!p.exists(), "конфиг удалён целиком");
+        assert!(!state_path(&env.app_dir, ClientId::Cursor).exists());
+        assert!(!connected(&env, ClientId::Cursor));
+    }
+
+    #[test]
     fn connect_fails_closed_on_invalid_config() {
         let env = TestEnv::new();
         let p = json_cfg(&env, "not json at all");
@@ -779,6 +853,20 @@ mod tests {
         assert!(v["mcpServers"].get("soul").is_none(), "soul удаляется: {text}");
         assert_eq!(v["mcpServers"]["user-added"]["command"], "y", "чужие изменения сохраняются");
         assert_eq!(v["mcpServers"]["other"]["command"], "x");
+    }
+
+    #[test]
+    fn rollback_removes_config_that_did_not_exist_before() {
+        // Файла до подключения не было — rollback не должен оставлять пустышку.
+        let env = TestEnv::new();
+        connect(&env, ClientId::Cursor).unwrap();
+        let p = client_config_path(ClientId::Cursor, &env.home);
+        assert!(p.exists());
+
+        rollback(&env, ClientId::Cursor).unwrap();
+        assert!(!p.exists(), "файл убран, а не оставлен пустым");
+        assert!(!state_path(&env.app_dir, ClientId::Cursor).exists());
+        assert!(!connected(&env, ClientId::Cursor));
     }
 
     #[test]

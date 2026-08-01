@@ -550,9 +550,80 @@ mod tests {
         assert!(lines[1].contains("SOUL CONTEXT"));
     }
 
+    /// End-to-end: запускает настоящий бинарь soul-mcp.exe с SOUL_APP_DIR,
+    /// гоняет initialize + tools/call по stdio и проверяет ответы. Если
+    /// бинарь не собран (например, `cargo test --lib`) — тест пропускается.
     #[test]
-    fn empty_database_yields_empty_pack() {
-        let dir = std::env::temp_dir().join(format!("soul-mcp-empty-{}", uuid::Uuid::new_v4()));
+    fn real_binary_serves_context_over_stdio() {
+        use std::io::Write as _;
+        use std::process::{Command, Stdio};
+        use std::time::Duration;
+
+        let env = TestEnv::new();
+        let exe = std::env::current_exe().unwrap();
+        let mut bin = exe.parent().unwrap().parent().unwrap().to_path_buf();
+        bin.push(if cfg!(windows) { "soul-mcp.exe" } else { "soul-mcp" });
+        if !bin.exists() {
+            eprintln!("soul-mcp binary not built; skipping E2E test ({})", bin.display());
+            return;
+        }
+
+        let mut child = Command::new(&bin)
+            .env("SOUL_APP_DIR", &env.dir)
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::null())
+            .spawn()
+            .expect("spawn soul-mcp");
+
+        let mut stdin = child.stdin.take().unwrap();
+        let mut stdout = std::io::BufReader::new(child.stdout.take().unwrap());
+
+        let mut request = |stdin: &mut std::process::ChildStdin, line: &str| {
+            writeln!(stdin, "{line}").unwrap();
+            stdin.flush().unwrap();
+            let mut buf = String::new();
+            stdout.read_line(&mut buf).unwrap();
+            serde_json::from_str::<Value>(buf.trim()).unwrap()
+        };
+
+        let res = request(
+            &mut stdin,
+            r#"{"jsonrpc":"2.0","id":1,"method":"initialize","params":{}}"#,
+        );
+        assert_eq!(res["id"], 1);
+        assert_eq!(res["result"]["serverInfo"]["name"], SERVER_NAME);
+
+        let res = request(
+            &mut stdin,
+            r#"{"jsonrpc":"2.0","id":2,"method":"tools/call","params":{"name":"soul.get_context","arguments":{}}}"#,
+        );
+        assert!(res.get("error").is_none(), "unexpected error: {res}");
+        let content = res["result"]["content"].as_array().unwrap();
+        assert!(content[0]["text"].as_str().unwrap().starts_with("SOUL CONTEXT"));
+        assert!(content[0]["text"].as_str().unwrap().contains("entities: 2"));
+        assert!(content[0]["text"].as_str().unwrap().contains("Prefers concise answers"));
+        assert!(content[0]["text"].as_str().unwrap().contains("Never share medical data"));
+
+        // Квитанция disclosure появилась в каталоге.
+        let receipts_dir = env.dir.join("receipts");
+        let files: Vec<_> = std::fs::read_dir(&receipts_dir).unwrap().collect();
+        assert_eq!(files.len(), 1);
+
+        drop(stdin);
+        let deadline = std::time::Instant::now() + Duration::from_secs(10);
+        loop {
+            if let Some(status) = child.try_wait().unwrap() {
+                assert!(status.success(), "soul-mcp exited with {status}");
+                break;
+            }
+            assert!(std::time::Instant::now() < deadline, "soul-mcp did not exit on stdin EOF");
+            std::thread::sleep(Duration::from_millis(50));
+        }
+    }
+
+    #[test]
+    fn empty_database_yields_empty_pack() {        let dir = std::env::temp_dir().join(format!("soul-mcp-empty-{}", uuid::Uuid::new_v4()));
         std::fs::create_dir_all(&dir).unwrap();
         init_db(&dir).unwrap(); // БД есть, душ нет
         let res = handle_line(
