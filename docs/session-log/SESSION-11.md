@@ -98,6 +98,7 @@
 ## Примечания по реализации
 
 - Оператор `in` не десериализуется через `#[serde(rename = "in")]` внутри `#[serde(untagged)]` enum-а («data did not match any variant of untagged enum Atom»). Воспроизведено в изоляции (`serde-test` в temp-каталоге). Рабочее решение — raw-идентификатор поля `r#in`; `#[serde(rename)]` для untagged-вариантов не срабатывает. Паттерн-матчинг: `Atom::In { r#in } => r#in`.
+- **Dev-среда**: с Node ≥17 на Windows vite с `host: false` биндится только на IPv6 `::1`, а Tauri опрашивает `localhost` по IPv4 — окно не открывалось («Waiting for your frontend dev server»). Фикс: `host: host || '127.0.0.1'` в `vite.config.ts`.
 
 ## Коммит
 
