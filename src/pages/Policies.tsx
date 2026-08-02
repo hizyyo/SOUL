@@ -4,13 +4,13 @@ import {
   presetById,
   validateRuleJson,
   effectOfRuleJson,
-  effectLabel,
   EVALUATION_EXAMPLE,
   EFFECTS,
   type Decision,
-  type Effect,
   type PolicyRow,
 } from '../data/policy';
+import { EffectBadge } from './PolicyBadges';
+import { GatewaySection } from './GatewaySection';
 
 declare global {
   interface Window {
@@ -77,29 +77,6 @@ const TEXTAREA: CSSProperties = {
   minHeight: '140px',
   resize: 'vertical',
 };
-
-const BADGE: Record<Effect, CSSProperties> = {
-  allow: { background: '#ecfdf5', color: '#047857' },
-  deny: { background: '#fef2f2', color: '#dc2626' },
-  require_confirmation: { background: '#fffbeb', color: '#b45309' },
-  redact: { background: '#eff6ff', color: '#1d4ed8' },
-};
-
-function EffectBadge({ effect }: { effect: Effect }) {
-  return (
-    <span
-      style={{
-        padding: '2px 8px',
-        borderRadius: '999px',
-        fontSize: '12px',
-        fontWeight: '600',
-        ...BADGE[effect],
-      }}
-    >
-      {effectLabel(effect)}
-    </span>
-  );
-}
 
 export function Policies() {
   const [rows, setRows] = useState<PolicyRow[]>([]);
@@ -343,6 +320,9 @@ export function Policies() {
         Демо-правила сеются один раз за жизнь хранилища: удалённые правила не воскресают. Оценка
         никогда не вызывает сеть и не имеет побочных эффектов.
       </p>
+
+      <h3 style={{ marginBottom: 8 }}>Имитированный Gateway (§4.11)</h3>
+      <GatewaySection />
     </div>
   );
 }

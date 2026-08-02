@@ -125,6 +125,7 @@ pub fn init_db(app_dir: &std::path::Path) -> SqlResult<Connection> {
 
     crate::eval::init_evaluations(&conn)?;
     crate::policy::init_policies(&conn)?;
+    crate::gateway::init_gateway(&conn)?;
 
     Ok(conn)
 }
@@ -332,6 +333,10 @@ pub fn wipe_all(conn: &Connection) -> SqlResult<()> {
          DELETE FROM evaluations;
          DELETE FROM policies;
          DELETE FROM policy_meta;
+         DELETE FROM capabilities;
+         DELETE FROM gateway_receipts;
+         DELETE FROM gateway_connectors;
+         DELETE FROM gateway_meta;
          DELETE FROM souls;",
     )?;
     conn.execute_batch("PRAGMA wal_checkpoint(TRUNCATE);")?;

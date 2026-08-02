@@ -3,6 +3,7 @@ mod context;
 mod crypto;
 mod db;
 mod eval;
+mod gateway;
 mod integrations;
 mod native_host;
 mod package;
@@ -496,6 +497,52 @@ fn evaluate_action_cmd(
     policy::evaluate(&conn, &action)
 }
 
+#[tauri::command]
+fn gateway_propose_cmd(
+    state: tauri::State<AppState>,
+    action_json: String,
+    ttl_seconds: Option<u64>,
+) -> Result<gateway::GatewayProposal, String> {
+    let conn = state.conn.lock().map_err(|e| e.to_string())?;
+    gateway::propose_action(&conn, &action_json, ttl_seconds)
+}
+
+#[tauri::command]
+fn gateway_execute_cmd(
+    state: tauri::State<AppState>,
+    capability_id: String,
+    connector_id: String,
+    account_id: String,
+    environment: String,
+    action_json: String,
+) -> Result<gateway::GatewayExecuteResult, String> {
+    let conn = state.conn.lock().map_err(|e| e.to_string())?;
+    gateway::execute_capability(
+        &conn,
+        &capability_id,
+        &connector_id,
+        &account_id,
+        &environment,
+        &action_json,
+    )
+}
+
+#[tauri::command]
+fn list_gateway_receipts_cmd(
+    state: tauri::State<AppState>,
+) -> Result<Vec<gateway::GatewayReceipt>, String> {
+    let conn = state.conn.lock().map_err(|e| e.to_string())?;
+    gateway::list_receipts(&conn)
+}
+
+#[tauri::command]
+fn list_gateway_capabilities_cmd(
+    state: tauri::State<AppState>,
+) -> Result<Vec<gateway::CapabilityInfo>, String> {
+    let conn = state.conn.lock().map_err(|e| e.to_string())?;
+    gateway::list_capabilities(&conn)
+}
+
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     tauri::Builder::default()
@@ -545,6 +592,10 @@ pub fn run() {
             set_policy_enabled_cmd,
             delete_policy_cmd,
             evaluate_action_cmd,
+            gateway_propose_cmd,
+            gateway_execute_cmd,
+            list_gateway_receipts_cmd,
+            list_gateway_capabilities_cmd,
         ])
         .setup(|app| {
             let app_dir = app
