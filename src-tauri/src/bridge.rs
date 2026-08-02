@@ -53,13 +53,16 @@ pub const ERR_RUNTIME_ERROR: &str = "runtime_error";
 
 /// Открывает БД SOUL. Сначала — строго на чтение (host не должен писать
 /// бизнес-данные); если read-only открытие невозможно (WAL требует доступа
-/// к `-wal`/`-shm`), открывает read-write — это только служебные файлы
-/// SQLite, в таблицы host не пишет.
+/// к `-wal`/`-shm`), открывает read-write и запирает на чтение
+/// `PRAGMA query_only=ON` — SQLite не примет ни одной записи в таблицы.
 pub fn open_app_db(app_dir: &Path) -> Result<Connection, String> {
     let db_path = app_dir.join("soul.db");
-    Connection::open_with_flags(&db_path, OpenFlags::SQLITE_OPEN_READ_ONLY)
+    let conn = Connection::open_with_flags(&db_path, OpenFlags::SQLITE_OPEN_READ_ONLY)
         .or_else(|_| Connection::open_with_flags(&db_path, OpenFlags::SQLITE_OPEN_READ_WRITE))
-        .map_err(|_| format!("SOUL database not found at {}.", db_path.to_string_lossy()))
+        .map_err(|_| format!("SOUL database not found at {}.", db_path.to_string_lossy()))?;
+    conn.pragma_update(None, "query_only", true)
+        .map_err(|e| format!("Cannot enforce read-only database access: {e}"))?;
+    Ok(conn)
 }
 
 /// Список разрешённых extension ID: env-переопределение для тестов, иначе

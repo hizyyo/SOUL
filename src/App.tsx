@@ -192,6 +192,7 @@ export function App() {
       });
     } catch (e) {
       setError(String(e));
+      throw e;
     }
   };
 

@@ -1,5 +1,8 @@
 import { describe, it, expect } from 'vitest';
-import { validateOutgoingRequest } from '../browser/src/protocol';
+import {
+  isContextResponse,
+  validateOutgoingRequest,
+} from '../browser/src/protocol';
 import { PROTOCOL_VERSION, EXTENSION_ID, MAX_TASK_CHARS } from '../browser/src/constants';
 
 const base = {
@@ -7,6 +10,38 @@ const base = {
   extensionId: EXTENSION_ID,
   nonce: 'n'.repeat(20),
 };
+
+const validContext = {
+  type: 'soul.context',
+  pack: '{"claims":[]}',
+  entityCount: 3,
+  tokenEstimate: 420,
+  policyVersion: '7f3a9c2e',
+  stateVersion: '5b38f537',
+  maxTokens: 900,
+};
+
+describe('isContextResponse', () => {
+  it('принимает корректный soul.context', () => {
+    expect(isContextResponse(validContext)).toBe(true);
+  });
+
+  it('отклоняет числовые версии вместо строк (несоответствие host-у)', () => {
+    expect(
+      isContextResponse({ ...validContext, policyVersion: 123 }),
+    ).toBe(false);
+    expect(
+      isContextResponse({ ...validContext, stateVersion: 42 }),
+    ).toBe(false);
+  });
+
+  it('отклоняет отсутствующие обязательные поля', () => {
+    const { pack: _pack, ...noPack } = validContext;
+    expect(isContextResponse(noPack)).toBe(false);
+    expect(isContextResponse({ ...validContext, entityCount: '3' })).toBe(false);
+    expect(isContextResponse(null)).toBe(false);
+  });
+});
 
 describe('validateOutgoingRequest', () => {
   it('принимает корректный soul.ping', () => {

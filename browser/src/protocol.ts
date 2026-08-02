@@ -44,8 +44,10 @@ export interface ContextResponse {
   pack: string;
   entityCount: number;
   tokenEstimate: number;
-  policyVersion: number;
-  stateVersion: number;
+  /** 8 hex-символов: версия policy-кодекса (host шлёт строкой, см. context.rs). */
+  policyVersion: string;
+  /** 8 hex-символов: хэш состояния БД (host шлёт строкой, см. context.rs). */
+  stateVersion: string;
   maxTokens: number;
 }
 
@@ -77,12 +79,23 @@ export function isContextResponse(value: unknown): value is ContextResponse {
     value !== null &&
     (value as { type?: unknown }).type === 'soul.context' &&
     typeof (value as { pack?: unknown }).pack === 'string' &&
-    typeof (value as { entityCount?: unknown }).entityCount === 'number'
+    typeof (value as { entityCount?: unknown }).entityCount === 'number' &&
+    typeof (value as { policyVersion?: unknown }).policyVersion === 'string' &&
+    typeof (value as { stateVersion?: unknown }).stateVersion === 'string'
   );
 }
 
 export type ValidationResult =
   { ok: true; request: OutgoingRequest } | { ok: false; error: ErrorResponse };
+
+/**
+ * Доверенным считается только сообщение, пришедшее от собственного
+ * контент-скрипта: chrome.runtime гарантирует, что sender.id нельзя
+ * подделать (в отличие от полей extensionId/origin внутри сообщения).
+ */
+export function isTrustedSender(sender: { readonly id?: unknown } | undefined | null): boolean {
+  return sender?.id === EXTENSION_ID;
+}
 
 /** Отклоняет запрос по правилам host-а (fail-closed до отправки). */
 export function validateOutgoingRequest(message: unknown): ValidationResult {

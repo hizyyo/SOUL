@@ -509,9 +509,8 @@ pub fn import_package_file(
     let vp = verify_package_bytes(&bytes, password, MAX_PACKAGE_BYTES)?;
     let payload = vp.payload;
 
-    db::wipe_all(conn).map_err(|e| e.to_string())?;
-
     let tx = conn.transaction().map_err(|e| e.to_string())?;
+    db::wipe_all_tx(&tx).map_err(|e| e.to_string())?;
 
     tx.execute(
         "INSERT INTO souls (soul_id, display_name, format_version, schema_version, created_at, head_event_hash, entity_count, device_id)
@@ -786,6 +785,43 @@ mod tests {
         path
     }
 
+    /// Собирает подписанный пакет из произвольного payload (для тестов,
+    /// где экспорт из БД невозможен).
+    fn package_from_payload(env: &TestEnv, payload: &SoulExportPayload) -> Vec<u8> {
+        let plaintext = serde_json::to_vec(payload).unwrap();
+        let (mem_kib, time, p) = FAST_KDF;
+        let sealed = crypto::encrypt_payload(&plaintext, PASSWORD, mem_kib, time, p).unwrap();
+        let keys = crypto::ensure_device_keypair(&env.dir).unwrap();
+        let mut envelope = Envelope {
+            format: PACKAGE_FORMAT.to_string(),
+            format_version: PACKAGE_FORMAT_VERSION.to_string(),
+            schema_version: SCHEMA_VERSION.to_string(),
+            soul_id: payload.soul.soul_id.clone(),
+            display_name: payload.soul.display_name.clone(),
+            device_id: payload.soul.device_id.clone(),
+            created_at: Utc::now().to_rfc3339(),
+            content_hash: crypto::sha256_hex(&plaintext),
+            device_public_key: keys.public_b64.clone(),
+            cipher: CipherParams {
+                name: "xchacha20-poly1305".to_string(),
+                kdf: "argon2id".to_string(),
+                salt: B64.encode(sealed.salt),
+                nonce: B64.encode(sealed.nonce),
+                mem_cost_kib: mem_kib,
+                time_cost: time,
+                parallelism: p,
+            },
+            payload_ciphertext: B64.encode(&sealed.ciphertext),
+            signature: None,
+        };
+        let canonical = serde_json::to_vec(&envelope).unwrap();
+        let mut to_sign = sha256_bytes(&canonical).to_vec();
+        to_sign.extend_from_slice(&sealed.ciphertext);
+        let signature = crypto::sign_bytes(&keys.private_bytes, &to_sign);
+        envelope.signature = Some(B64.encode(signature));
+        serde_json::to_vec(&envelope).unwrap()
+    }
+
     #[test]
     fn envelope_canonical_serialization_is_stable() {
         let mut env = TestEnv::new();
@@ -977,6 +1013,33 @@ mod tests {
         assert!(entities.iter().any(|e| e.entity_type == "boundary"));
         let events = list_events(&env.conn, &soul_id).unwrap();
         assert!(events.len() >= 3);
+    }
+
+    #[test]
+    fn failed_import_with_invalid_payload_preserves_existing_soul() {
+        let mut env = TestEnv::new();
+        let soul_id = create_seeded_soul(&mut env);
+        let path = export_fast(&env, &soul_id);
+        let bytes = std::fs::read(&path).unwrap();
+        let vp = verify_package_bytes(&bytes, PASSWORD, MAX_PACKAGE_BYTES).unwrap();
+
+        // Валидно подписанный пакет с дублирующимся id сущности: проверка
+        // подписи проходит, но вставка падает (UNIQUE) — существующий SOUL
+        // обязан уцелеть.
+        let mut payload = vp.payload.clone();
+        payload.entities.push(payload.entities[0].clone());
+        let bad_path = env.dir.join("dup-events.soul");
+        std::fs::write(&bad_path, package_from_payload(&env, &payload)).unwrap();
+
+        let err = import_package_file(&mut env.conn, &bad_path, PASSWORD).unwrap_err();
+        assert!(err.contains("UNIQUE"), "unexpected error: {err}");
+        assert_eq!(
+            list_souls(&env.conn).unwrap().len(),
+            1,
+            "existing soul must survive failed import"
+        );
+        assert_eq!(list_entities(&env.conn, &soul_id).unwrap().len(), 2);
+        assert!(is_soul_activated(&env.conn, &soul_id).unwrap());
     }
 
     #[test]

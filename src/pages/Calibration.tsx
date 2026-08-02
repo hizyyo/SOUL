@@ -54,13 +54,15 @@ export function Calibration({
     setSaving(true);
     try {
       await onSave(stepIdx + 1, answers);
-      if (stepIdx < TOTAL_STEPS - 1) {
-        setStepIdx(stepIdx + 1);
-      } else {
-        onComplete(answers);
-      }
-    } finally {
       setSaving(false);
+    } catch {
+      setSaving(false);
+      return;
+    }
+    if (stepIdx < TOTAL_STEPS - 1) {
+      setStepIdx(stepIdx + 1);
+    } else {
+      onComplete(answers);
     }
   };
 
@@ -168,6 +170,10 @@ function QuestionRow({
 
   if (question.type === 'multiple' && question.options) {
     const selected = Array.isArray(val) ? val : val ? [val] : [];
+    const toggle = (opt: string) => {
+      const next = selected.includes(opt) ? selected.filter((o) => o !== opt) : [...selected, opt];
+      onAnswer(next);
+    };
     return (
       <div style={{ padding: '12px', border: '1px solid #e5e7eb', borderRadius: '8px' }}>
         <p style={{ margin: '0 0 8px', fontWeight: 500 }}>{question.prompt}</p>
@@ -179,12 +185,7 @@ function QuestionRow({
                 key={opt}
                 style={{ display: 'flex', alignItems: 'center', gap: '8px', cursor: 'pointer' }}
               >
-                <input
-                  type="radio"
-                  name={question.id}
-                  checked={isSel}
-                  onChange={() => onAnswer(opt)}
-                />
+                <input type="checkbox" checked={isSel} onChange={() => toggle(opt)} />
                 {opt}
               </label>
             );

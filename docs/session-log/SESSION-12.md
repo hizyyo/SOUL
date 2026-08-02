@@ -174,3 +174,31 @@
 ## Коммит (ultra-review)
 
 - `8be7fb7` `fix(soul): session-12 ultra-review — stored-payload integrity re-hash, environment required in normalize_action, atomic propose [session-12]`
+
+---
+
+## Project-wide ultra-review: все компоненты (Rust + TS + расширение + конфиги)
+
+Систематическая проверка всего проекта четырьмя ревью-агентами (Rust-бэкенд, TS-фронт, браузерное расширение, конфиги/спека) с последующей ручной верификацией каждого пункта по коду. Найдено и исправлено:
+
+### Найдено и исправлено
+
+1. **CRITICAL: браузерный relay принимал сообщения от любого отправителя.** `background.ts` не проверял `sender.id` в `chrome.runtime.onMessage`: любое другое установленное расширение могло вызвать `chrome.runtime.sendMessage(наш_id, …)` и получить контекст пользователя (проверки `extensionId`/`origin` в `validateOutgoingRequest` работали с самозаявленными полями сообщения). Исправление: `isTrustedSender` — сообщения принимаются только с `sender.id === EXTENSION_ID` (поле, которое Chrome не даёт подделать); прочим — `soul.error` `invalid_sender` без обращения к native host. Тесты: `tests/browser-sender.test.ts` (мок `chrome` + динамический импорт модуля).
+2. **HIGH: неатомарный импорт пакета.** `import_package_file` вызывал `db::wipe_all` вне транзакции: валидно подписанный пакет с невставляемыми данными (дубль id) уничтожал существующий SOUL без восстановления (нарушение §4.3/§4.12). Исправление: `wipe_all_tx(&tx)` внутри той же транзакции, что и вставки (`VACUUM`/checkpoint остались в `wipe_all` отдельно — внутри транзакции они запрещены). Тест: `failed_import_with_invalid_payload_preserves_existing_soul` (сборка подписанного пакета из произвольного payload).
+3. **MEDIUM: вопросы типа `multiple` рендерились как radio.** В `Calibration.tsx` выбор нескольких тем (bound_1/bound_2) был невозможен, ответы уходили строкой. Исправление: checkboxes с toggle-логикой в массив; `compile.ts` распознаёт «Nothing is off-limits» в массиве (dispute-правило). Тесты: массивы в `tests/compile.test.ts`.
+4. **MEDIUM: ошибка сохранения калибровки проглатывалась.** `handleSaveCalibration` ловил ошибку и не перевыбрасывал — `handleNext` продвигался дальше, ответы фактически не сохранялись. Теперь ошибка перевыбрасывается, `handleNext` не продвигает шаг при сбое (ошибка показана родителем).
+5. **LOW: unbounded чтение строк в MCP.** `serve_io` читал `lines()` без лимита. Введён `MCP_MAX_LINE_BYTES = 4 МБ` (дефолт MCP SDK), `read_until` + дочитывание остатка строки, превышение — parse-ошибка, цикл продолжается. Тест: `serve_io_rejects_oversized_line_and_continues`.
+6. **LOW: read-only-фолбэк молча открывал БД на запись.** В `bridge.rs` и `mcp.rs` при отсутствии `-wal`/`-shm` read-only-открытие падало на read-write. Исправление: после фолбэка `PRAGMA query_only=ON` — ни одна запись в таблицы невозможна. Тест: `read_only_connection_rejects_writes_even_after_fallback`.
+7. **HIGH: CSP отключён + мёртвый shell-плагин.** `tauri.conf.json` `csp: null`; `shell:allow-open` в capabilities без единого вызова + `tauri_plugin_shell::init()`. Исправление: строгий CSP (`default-src 'self'`, без remote/`data:` для скриптов, `frame-ancestors 'none'`, `object-src 'none'`; `'unsafe-inline'` только для script/style из-за vite dev и inline-стилей React), удалены зависимость `tauri-plugin-shell`, инициализация и привилегия.
+8. **LOW: несоответствие типов версий протокола.** `protocol.ts` объявлял `policyVersion`/`stateVersion` как `number`, host шлёт строки (8 hex, `context.rs`). Типы исправлены, `isContextResponse` теперь проверяет строковый тип. Тесты: `tests/browser-protocol.test.ts`.
+
+### Проверка после исправлений
+
+- `cargo test --lib`: **PASS** — 205 passed (+3: атомарный импорт, лимит строки MCP, query_only).
+- `cargo clippy --all-targets`: **PASS** — без предупреждений. `cargo fmt --check`: **PASS**.
+- `pnpm test`: **PASS** — 235 passed (+9: sender-валидация ×4, массивы в compile ×3, isContextResponse ×2 из 3 новых).
+- `pnpm typecheck` / `pnpm lint` / `pnpm format` / `pnpm build:companion`: **PASS**.
+
+## Коммит (project-wide ultra-review)
+
+- `e56dc2d` `fix(soul): project-wide ultra-review — trusted-sender gate in browser relay, atomic import wipe, calibration multi-select and save errors, MCP line cap + query_only, CSP, drop dead shell plugin [session-12]`

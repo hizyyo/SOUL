@@ -95,6 +95,32 @@ describe('compileAnswers', () => {
     }
   });
 
+  it('detects the dispute when multiple answers are arrays (checkbox)', () => {
+    const answers: CalibrationAnswer[] = [
+      { questionId: 'bound_1', value: ['Financial decisions', 'Health advice'] },
+      { questionId: 'bound_2', value: ['Passwords and secrets', 'Nothing is off-limits'] },
+    ];
+    const compiled = compileAnswers(answers, QUESTIONS);
+    expect(compiled).toHaveLength(2);
+    for (const item of compiled) {
+      expect(item.disputed).toBe(true);
+    }
+  });
+
+  it('does not flag a dispute when the array lacks the off-limits option', () => {
+    const compiled = compileAnswers(
+      [
+        { questionId: 'bound_1', value: ['Financial decisions'] },
+        { questionId: 'bound_2', value: ['Passwords and secrets'] },
+      ],
+      QUESTIONS,
+    );
+    expect(compiled).toHaveLength(2);
+    for (const item of compiled) {
+      expect(item.disputed).toBe(false);
+    }
+  });
+
   it('does not flag disputes when nothing is off-limits is not selected', () => {
     const compiled = compileAnswers(fullAnswers(), QUESTIONS);
     for (const item of compiled) {

@@ -10,6 +10,7 @@ import { HOST_NAME, HOST_TIMEOUT_MS } from './constants';
 import {
   errorResponse,
   isErrorResponse,
+  isTrustedSender,
   validateOutgoingRequest,
   type BridgeIncoming,
   type ErrorResponse,
@@ -95,7 +96,13 @@ async function handleRequest(message: unknown): Promise<BridgeIncoming> {
 }
 
 chrome.runtime.onMessage.addListener(
-  (message: unknown, _sender: ChromeSender, sendResponse: (response: unknown) => void) => {
+  (message: unknown, sender: ChromeSender, sendResponse: (response: unknown) => void) => {
+    if (!isTrustedSender(sender)) {
+      sendResponse(
+        errorResponse('invalid_sender', 'Сообщение отклонено: неизвестный отправитель.'),
+      );
+      return false;
+    }
     void handleRequest(message).then(sendResponse);
     return true;
   },

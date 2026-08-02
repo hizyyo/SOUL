@@ -1,5 +1,5 @@
 use chrono::Utc;
-use rusqlite::{params, Connection, Result as SqlResult};
+use rusqlite::{params, Connection, Result as SqlResult, Transaction};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use uuid::Uuid;
@@ -323,24 +323,32 @@ pub fn get_soul_state(conn: &Connection, soul_id: &str) -> SqlResult<(i32, Strin
     }
 }
 
+const WIPE_SQL: &str = "DELETE FROM entities;
+     DELETE FROM events;
+     DELETE FROM soul_state;
+     DELETE FROM evaluations;
+     DELETE FROM policies;
+     DELETE FROM policy_meta;
+     DELETE FROM capabilities;
+     DELETE FROM gateway_receipts;
+     DELETE FROM gateway_connectors;
+     DELETE FROM gateway_meta;
+     DELETE FROM souls;";
+
 pub fn wipe_all(conn: &Connection) -> SqlResult<()> {
     conn.execute_batch("PRAGMA secure_delete=ON;")?;
     conn.execute_batch("PRAGMA wal_checkpoint(TRUNCATE);")?;
-    conn.execute_batch(
-        "DELETE FROM entities;
-         DELETE FROM events;
-         DELETE FROM soul_state;
-         DELETE FROM evaluations;
-         DELETE FROM policies;
-         DELETE FROM policy_meta;
-         DELETE FROM capabilities;
-         DELETE FROM gateway_receipts;
-         DELETE FROM gateway_connectors;
-         DELETE FROM gateway_meta;
-         DELETE FROM souls;",
-    )?;
+    conn.execute_batch(WIPE_SQL)?;
     conn.execute_batch("PRAGMA wal_checkpoint(TRUNCATE);")?;
     conn.execute_batch("VACUUM;")?;
+    Ok(())
+}
+
+/// Удаляет все данные без checkpoint/VACUUM. Вызывается изнутри активной
+/// транзакции (например, при импорте пакета), чтобы откат ошибки в той же
+/// транзакции не терял существующие данные.
+pub fn wipe_all_tx(tx: &Transaction<'_>) -> SqlResult<()> {
+    tx.execute_batch(WIPE_SQL)?;
     Ok(())
 }
 

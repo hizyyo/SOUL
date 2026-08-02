@@ -13,7 +13,7 @@ use crate::db;
 use crate::package::{self, DisclosureReceipt};
 use rusqlite::{Connection, OpenFlags};
 use serde_json::{json, Value};
-use std::io::{BufRead, Write};
+use std::io::{BufRead, Read, Write};
 use std::path::Path;
 
 pub const MCP_PROTOCOL_VERSION: &str = "2025-06-18";
@@ -106,12 +106,16 @@ fn get_context_tool_spec() -> Value {
 
 /// Открывает БД SOUL только на чтение (никаких записей из MCP-процесса).
 /// Фолбэк на read-write-открытие без CREATE нужен для WAL-баз, где
-/// read-only-коннект невозможен из-за отсутствующих -shm файлов.
+/// read-only-коннект невозможен из-за отсутствующих -shm файлов; фолбэк
+/// немедленно запирается на чтение PRAGMA query_only=ON.
 pub fn open_app_db(app_dir: &Path) -> Result<Connection, String> {
     let db_path = app_dir.join("soul.db");
-    Connection::open_with_flags(&db_path, OpenFlags::SQLITE_OPEN_READ_ONLY)
+    let conn = Connection::open_with_flags(&db_path, OpenFlags::SQLITE_OPEN_READ_ONLY)
         .or_else(|_| Connection::open_with_flags(&db_path, OpenFlags::SQLITE_OPEN_READ_WRITE))
-        .map_err(|_| format!("SOUL database not found at {}.", db_path.to_string_lossy()))
+        .map_err(|_| format!("SOUL database not found at {}.", db_path.to_string_lossy()))?;
+    conn.pragma_update(None, "query_only", true)
+        .map_err(|e| format!("Cannot enforce read-only database access: {e}"))?;
+    Ok(conn)
 }
 
 /// Резолв app_dir для MCP-процесса: SOUL_APP_DIR (тесты/отладка) →
@@ -147,24 +151,53 @@ pub fn serve_stdio(app_dir: &Path) -> Result<(), String> {
     serve_io(&mut reader, &mut writer, app_dir)
 }
 
+/// Максимальная длина одной строки JSON-RPC на stdin (дефолтный лимит MCP
+/// SDK — 4 МБ). Строки длиннее отклоняются с parse-ошибкой, цикл не рвётся.
+pub const MCP_MAX_LINE_BYTES: usize = 4 * 1024 * 1024;
+
 /// Тестируемая обвязка: читает строки из reader, пишет ответы в writer.
 pub fn serve_io<R: BufRead, W: Write>(
     reader: &mut R,
     writer: &mut W,
     app_dir: &Path,
 ) -> Result<(), String> {
-    for line in reader.lines() {
-        let line = line.map_err(|e| format!("stdin read failed: {e}"))?;
-        if let Some(response) = handle_line(&line, app_dir) {
-            let json = serde_json::to_string(&response)
-                .map_err(|e| format!("response serialization failed: {e}"))?;
-            writeln!(writer, "{json}").map_err(|e| format!("stdout write failed: {e}"))?;
-            writer
-                .flush()
-                .map_err(|e| format!("stdout flush failed: {e}"))?;
+    let mut line: Vec<u8> = Vec::new();
+    loop {
+        line.clear();
+        let n = reader
+            .read_until(b'\n', &mut line)
+            .map_err(|e| format!("stdin read failed: {e}"))?;
+        if n == 0 {
+            return Ok(());
+        }
+        if line.len() > MCP_MAX_LINE_BYTES {
+            if line.last() != Some(&b'\n') {
+                // Досчитываем остаток строки, чтобы не разъехаться по кадрам.
+                let mut drain: Vec<u8> = Vec::new();
+                let _ = reader
+                    .take(MCP_MAX_LINE_BYTES as u64 + 1)
+                    .read_to_end(&mut drain);
+            }
+            write_line(
+                writer,
+                &rpc_error(Value::Null, JSONRPC_PARSE_ERROR, "Request line too large"),
+            )?;
+            continue;
+        }
+        let line_str = String::from_utf8_lossy(&line);
+        if let Some(response) = handle_line(&line_str, app_dir) {
+            write_line(writer, &response)?;
         }
     }
-    Ok(())
+}
+
+fn write_line<W: Write>(writer: &mut W, response: &Value) -> Result<(), String> {
+    let json = serde_json::to_string(response)
+        .map_err(|e| format!("response serialization failed: {e}"))?;
+    writeln!(writer, "{json}").map_err(|e| format!("stdout write failed: {e}"))?;
+    writer
+        .flush()
+        .map_err(|e| format!("stdout flush failed: {e}"))
 }
 
 /// Обработка одной строки входящего JSON-RPC сообщения. Notification (без id)
@@ -689,6 +722,41 @@ mod tests {
         let dir = std::env::temp_dir().join(format!("soul-mcp-nodb-{}", uuid::Uuid::new_v4()));
         std::fs::create_dir_all(&dir).unwrap();
         assert!(open_app_db(&dir).is_err());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn serve_io_rejects_oversized_line_and_continues() {
+        let env = TestEnv::new();
+        let mut input = String::new();
+        input.push('{');
+        input.push_str(&"x".repeat(MCP_MAX_LINE_BYTES));
+        input.push_str("\n{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"initialize\"}\n");
+        let mut reader = Cursor::new(input.into_bytes());
+        let mut writer: Vec<u8> = Vec::new();
+        serve_io(&mut reader, &mut writer, &env.dir).unwrap();
+        let out = String::from_utf8(writer).unwrap();
+        let lines: Vec<&str> = out.lines().collect();
+        assert_eq!(
+            lines.len(),
+            2,
+            "oversized line must not kill the loop: {out}"
+        );
+        let first: Value = serde_json::from_str(lines[0]).unwrap();
+        assert_eq!(first["error"]["code"], JSONRPC_PARSE_ERROR);
+        assert!(lines[1].contains("\"protocolVersion\""));
+    }
+
+    #[test]
+    fn read_only_connection_rejects_writes_even_after_fallback() {
+        let dir = std::env::temp_dir().join(format!("soul-mcp-ro-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&dir).unwrap();
+        init_db(&dir).unwrap();
+        let conn = open_app_db(&dir).unwrap();
+        assert!(
+            conn.execute_batch("DELETE FROM souls;").is_err(),
+            "query_only must block writes after the read-write fallback"
+        );
         let _ = std::fs::remove_dir_all(&dir);
     }
 }

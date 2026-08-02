@@ -28,9 +28,9 @@ function computeDispute(
   if (type !== 'boundary') return false;
   const bound2 = answers.find((a) => a.questionId === 'bound_2');
   const bound1 = answers.find((a) => a.questionId === 'bound_1');
-  const nothingOffLimits =
-    bound2 &&
-    (typeof bound2.value === 'string' ? bound2.value : '').includes('Nothing is off-limits');
+  const raw = bound2?.value;
+  const bound2Values = Array.isArray(raw) ? raw : typeof raw === 'string' ? [raw] : [];
+  const nothingOffLimits = bound2Values.some((v) => v.includes('Nothing is off-limits'));
   const hasBound1Topics = bound1 && nonEmpty(bound1.value);
   if (!nothingOffLimits || !hasBound1Topics) return false;
   return questionId === 'bound_1' || questionId === 'bound_2';
