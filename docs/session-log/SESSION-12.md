@@ -16,7 +16,7 @@
 - **Этап выполнения** `execute_capability(conn, capability_id, connector, account, environment, action_json)`: порядок проверок — существование → не использована → не истекла → hash нагрузки совпал → канал в локальном реестре имитированных коннекторов → повторная оценка политики (изменение правил между предложением и выполнением тоже блокирует) → поддельный коннектор → capability помечается использованной, квитанция `pending` обновляется до `simulated`. Каждый отказ оставляет квитанцию `refused` с причиной (без обращения к коннектору); неудачная проверка не сжигает capability, сжигает только реальная имитация.
 - **Реестр каналов** (таблица `gateway_connectors`, PK по тройке): 4 демо-строки, сеются один раз за жизнь хранилища (флаг в `gateway_meta`, как демо-политики SESSION-11). Проверка канала даёт детерминированную причину: `connector mismatch` / `account mismatch` / `environment mismatch`.
 - **Квитанции** (таблица `gateway_receipts`): id, capability_id, action_id, kind, status (`pending|simulated|denied|held|redacted|refused`), decision_effect, rule_id, message, connector_executed, reason, nonce, created_at. Без исходной чувствительной нагрузки (как квитанции решений SESSION-11).
-- **22 теста**: нормализация (обрезка + детерминированный hash, пустые обязательные поля, лимиты, битый JSON), предложение (capability с nonce/сроком, уникальность nonce, deny сидом, require_confirmation сидом, redact кастомным правилом, кламп TTL, ошибка), выполнение (успех + однократность, повтор → отказ, изменённая нагрузка → отказ, неверный коннектор/учётка/окружение → отказ, истёкшая → отказ, неизвестная → отказ, политика на момент выполнения, запрещённое действие не достигает коннектора, детерминизм поддельного коннектора), хранилище (списки свежими первыми, сид реестра идемпотентен, wipe_all очищает и пересеивает).
+- **25 тестов**: нормализация (обрезка + детерминированный hash, пустые обязательные поля, лимиты, битый JSON), предложение (capability с nonce/сроком, уникальность nonce, deny сидом, require_confirmation сидом, redact кастомным правилом, кламп TTL, ошибка), выполнение (успех + однократность, повтор → отказ, изменённая нагрузка → отказ, неверный коннектор/учётка/окружение → отказ, истёкшая → отказ, неизвестная → отказ, политика на момент выполнения, запрещённое действие не достигает коннектора, детерминизм поддельного коннектора), хранилище (списки свежими первыми, сид реестра идемпотентен, wipe_all очищает и пересеивает).
 
 ### Rust: интеграция (`src-tauri/src/db.rs`, `src-tauri/src/lib.rs`)
 
@@ -128,7 +128,7 @@
 
 ### Изменённые файлы (review-pass)
 
-- `src-tauri/src/gateway.rs` — канал в capability, подпись (capability + квитанции), `confirm_capability`, redact-продолжение, транзакции, CRUD реестра, миграция `ensure_column` (ALTER TABLE ADD COLUMN для БД первой версии), 35 тестов.
+- `src-tauri/src/gateway.rs` — канал в capability, подпись (capability + квитанции), `confirm_capability`, redact-продолжение, транзакции, CRUD реестра, миграция `ensure_column` (ALTER TABLE ADD COLUMN для БД первой версии), 38 тестов.
 - `src-tauri/src/lib.rs` — `gateway_device_keys(app)`; команды получают `app: AppHandle` и ключи; + `gateway_confirm_cmd`, `list_gateway_connectors_cmd`, `gateway_add_connector_cmd`, `gateway_remove_connector_cmd`.
 - `src/data/gateway.ts` — `GatewayCapability` (канал, `decision_effect`, `confirmed_by_user`, `redacted`, подпись, `signature_valid`), `GatewayReceipt` (подпись, `signature_valid`), `GatewayChannel` (snake_case), `validateChannelInput`, `capabilityState` → `held`, лимиты реестра.
 - `src/pages/GatewaySection.tsx` — подтверждение held-capability кнопкой «Подтвердить (пользователь)», живой реестр (список/добавить/удалить), селект канала из реестра, бейджи подписи «✓ подписано / ✕ подпись недействительна».
@@ -137,7 +137,7 @@
 
 ### Тесты (review-pass)
 
-- `cargo test --lib`: **PASS** — 200 passed (35 gateway: привязка канала ×3 + удалённый из реестра канал, подделка подписи capability (срок/канал) → «invalid capability signature», подделка квитанции → `signature_valid=false`, confirm-поток ×5, redact-продолжение, CRUD реестра ×2, предложение для канала вне реестра, регресс первого прохода).
+- `cargo test --lib`: **PASS** — 200 passed (38 gateway: привязка канала ×3 + удалённый из реестра канал, подделка подписи capability (срок/канал) → «invalid capability signature», подделка квитанции → `signature_valid=false`, confirm-поток ×5, redact-продолжение, CRUD реестра ×2, предложение для канала вне реестра, регресс первого прохода).
 - `cargo clippy --all-targets`: **PASS** — без предупреждений.
 - `cargo fmt --check`: **PASS**.
 - `cargo build`: **PASS**.
@@ -151,3 +151,26 @@
 ## Коммит (review-pass)
 
 - `bd0b155` `fix(soul): review-pass session-12 — channel-bound signed capabilities, confirmation flow, redaction continuation, atomic execution, editable connector registry [session-12]`
+
+---
+
+## Ultra-review (SESSION-12): все ошибки сессии
+
+Повторная систематическая проверка всей сессии (первая версия + review-pass) по коду и каждому тесту. Найденное и исправленное:
+
+### Найдено и исправлено
+
+1. **Пробел в целостности сохранённой нагрузки (главное).** Подпись capability покрывает hash нагрузки, но не само сохранённое `action_json`/`redacted_json`: локальное вмешательство в эти колонки подписью не ловилось (подпись оставалась валидной), а подделанное действие попадало в повторную оценку политики и в поддельный коннектор. Исправление: при выполнении сохранённое действие повторно хешируется и сверяется с подписанным `payload_hash`, `redacted_json` сверяется с каноническим отредактированным вариантом; расхождение — отказ «stored action tampered» (fail-closed, как остальные подделки). Тесты: `tampered_stored_payload_is_refused`, `tampered_redacted_variant_is_refused`.
+2. **Рассинхрон обязательных полей.** `environment` отсутствовал в проверке обязательных полей `normalize_action` (Rust) и `validateActionJson` (TS), хотя `validateChannelInput` его требует; пустое окружение доходило до общей ошибки канала реестра. Исправлено в обоих зеркалах; кейс добавлен в `normalize_rejects_missing_required_fields`.
+3. **Нетранзакционность `propose_action`.** Capability и квитанция вставлялись раздельно — при сбое вставки квитанции (лимит 2000) оставалась осиротевшая capability без квитанции. Теперь обе записи в одной транзакции, сбой откатывает capability.
+4. **Числа в журнале.** Gateway-тестов было 25 в первой версии и 38 после review-pass, а не 22 и 35 (итоги 187/200 были верны, недосчёт — только в описании). Исправлено здесь.
+
+### Проверка после исправлений
+
+- `cargo test --lib`: **PASS** — 202 passed (40 gateway: +2 на целостность сохранённой нагрузки, +кейс environment).
+- `cargo clippy --all-targets`: **PASS** — без предупреждений. `cargo fmt --check`: **PASS**.
+- `pnpm test`: **PASS** — 226 passed (17 gateway). `pnpm typecheck` / `pnpm lint` / `pnpm format` / `pnpm build`: **PASS**.
+
+## Коммит (ultra-review)
+
+- `8be7fb7` `fix(soul): session-12 ultra-review — stored-payload integrity re-hash, environment required in normalize_action, atomic propose [session-12]`

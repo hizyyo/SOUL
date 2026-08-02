@@ -19,6 +19,13 @@
 //! скрыты; реестр имитированных коннекторов управляется из интерфейса
 //! (добавление/удаление), оставаясь локальной имитацией.
 //!
+//! Ultra-review (SESSION-12): сохранённая нагрузка не доверяется — при
+//! выполнении `action_json` повторно хешируется и сверяется с подписанным
+//! `payload_hash`, `redacted_json` — с каноническим отредактированным вариантом
+//! (вмешательство в эти колонки не покрывается подписью и ловится отдельно,
+//! fail-closed); `propose_action` атомарен (capability + квитанция в одной
+//! транзакции); `environment` — обязательное поле наравне с остальными.
+//!
 //! Каждый шаг оставляет квитанцию со статусом имитации: pending (capability
 //! выдана), simulated (поддельный коннектор выполнил действие), denied
 //! (запрещено политикой), held (ожидает подтверждения пользователя), redacted
@@ -364,9 +371,10 @@ pub fn normalize_action(json: &str) -> Result<SoulAction, String> {
         || action.actor.is_empty()
         || action.connector_id.is_empty()
         || action.account_id.is_empty()
+        || action.environment.is_empty()
     {
         return Err(
-            "Required action fields (actionId, kind, actor, connectorId, accountId) must not be empty."
+            "Required action fields (actionId, kind, actor, connectorId, accountId, environment) must not be empty."
                 .to_string(),
         );
     }
@@ -726,7 +734,12 @@ pub fn propose_action(
         signer_public_key: keys.public_b64.clone(),
     };
     let signature = sign_capability(keys, &cap_row);
-    conn.execute(
+    // Capability и квитанция в одной транзакции: сбой вставки квитанции
+    // (лимит списка) откатывает capability — никаких осиротевших строк.
+    let tx = conn
+        .unchecked_transaction()
+        .map_err(|e| format!("propose transaction failed: {e}"))?;
+    tx.execute(
         "INSERT INTO capabilities (
             id, action_id, kind, payload_hash, nonce, action_json, redacted_json,
             expires_at, created_at, connector_id, account_id, environment,
@@ -756,7 +769,7 @@ pub fn propose_action(
     cap_row.signature = signature;
     let capability = capability_info_from_row(&cap_row);
     let receipt = insert_receipt(
-        conn,
+        &tx,
         keys,
         &action,
         ReceiptFields {
@@ -770,6 +783,8 @@ pub fn propose_action(
             reason: None,
         },
     )?;
+    tx.commit()
+        .map_err(|e| format!("propose commit failed: {e}"))?;
     Ok(GatewayProposal {
         decision,
         capability: Some(capability),
@@ -1155,6 +1170,18 @@ pub fn execute_capability(
     }
     let stored: SoulAction = serde_json::from_str(&cap.action_json)
         .map_err(|e| format!("stored action is corrupted: {e}"))?;
+    // Подпись покрывает hash нагрузки, а не само сохранённое действие: локальное
+    // вмешательство в `action_json` (или `redacted_json`) сверяется здесь с
+    // подписанными ожиданиями — fail-closed, как и подделка остальных полей.
+    if payload_hash_of(&stored) != cap.payload_hash {
+        return refuse(conn, keys, &cap, &action, "stored action tampered");
+    }
+    if let Some(redacted_json) = &cap.redacted_json {
+        let expected = canonical_action_json(&redact_variant(&stored));
+        if redacted_json != &expected {
+            return refuse(conn, keys, &cap, &action, "stored action tampered");
+        }
+    }
     let decision = policy::evaluate(conn, &stored)?;
     // Жёсткий блок — только Deny: для held/redact-capability повторная оценка
     // на момент выполнения закономерно возвращает require_confirmation/redact
@@ -1477,6 +1504,12 @@ mod tests {
         )
         .unwrap_err();
         assert!(err.contains("must not be empty"), "unexpected error: {err}");
+        let err = normalize_action(
+            &env.allowed_action()
+                .replace("\"environment\":\"production\"", "\"environment\":\"\""),
+        )
+        .unwrap_err();
+        assert!(err.contains("must not be empty"), "unexpected error: {err}");
     }
 
     #[test]
@@ -1696,6 +1729,64 @@ mod tests {
             receipts.iter().any(|r| !r.signature_valid),
             "tampered receipt must be flagged"
         );
+    }
+
+    #[test]
+    fn tampered_stored_payload_is_refused() {
+        let env = TestEnv::new();
+        let json = env.allowed_action();
+        let cap = propose(&env, &json).capability.unwrap();
+        // Подпись покрывает hash нагрузки, а не само сохранённое действие:
+        // вмешательство в `action_json` ловится повторным хешированием при
+        // выполнении (fail-closed), а не подписью.
+        let mut forged: SoulAction = serde_json::from_str(&json).unwrap();
+        forged.amount = Some(9000.0);
+        env.conn
+            .execute(
+                "UPDATE capabilities SET action_json = ?1 WHERE id = ?2",
+                params![serde_json::to_string(&forged).unwrap(), cap.id],
+            )
+            .unwrap();
+        let result = execute_ok(&env, &cap.id, &json);
+        assert!(!result.ok);
+        assert_eq!(
+            result.receipt.reason.as_deref(),
+            Some("stored action tampered")
+        );
+        assert!(!result.receipt.connector_executed);
+        assert!(
+            list_capabilities(&env.conn).unwrap()[0].signature_valid,
+            "signature itself stays valid — the tamper is caught by payload re-hash"
+        );
+    }
+
+    #[test]
+    fn tampered_redacted_variant_is_refused() {
+        let env = TestEnv::new();
+        create_policy(
+            &env.conn,
+            r#"{"id":"r_redact","priority":800,"when":{"eq":["action.kind","email.send"]},"effect":"redact","message":"m"}"#,
+        )
+        .unwrap();
+        let json = env.allowed_action().replace("notes.create", "email.send");
+        let cap = propose(&env, &json).capability.unwrap();
+        assert!(cap.redacted);
+        // Вместо отредактированного варианта подложена полная нагрузка:
+        // коннектор не должен «выполнить» неотредактированные данные.
+        let full: SoulAction = serde_json::from_str(&json).unwrap();
+        env.conn
+            .execute(
+                "UPDATE capabilities SET redacted_json = ?1 WHERE id = ?2",
+                params![canonical_action_json(&full), cap.id],
+            )
+            .unwrap();
+        let result = execute_ok(&env, &cap.id, &json);
+        assert!(!result.ok);
+        assert_eq!(
+            result.receipt.reason.as_deref(),
+            Some("stored action tampered")
+        );
+        assert!(!result.receipt.connector_executed);
     }
 
     // ---------- Выполнение ----------

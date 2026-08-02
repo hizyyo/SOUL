@@ -214,7 +214,7 @@ export function validateActionJson(raw: string): { ok: boolean; error: string | 
     return { ok: false, error: `Action exceeds ${MAX_ACTION_JSON_CHARS} characters.` };
   }
   const action = parsed as Record<string, unknown>;
-  for (const field of ['actionId', 'kind', 'actor', 'connectorId', 'accountId']) {
+  for (const field of ['actionId', 'kind', 'actor', 'connectorId', 'accountId', 'environment']) {
     if (typeof action[field] !== 'string' || action[field].trim().length === 0) {
       return {
         ok: false,
