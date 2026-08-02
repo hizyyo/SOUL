@@ -48,13 +48,184 @@ pub struct EntityRow {
 
 pub fn init_db(app_dir: &std::path::Path) -> SqlResult<Connection> {
     let db_path = app_dir.join("soul.db");
-    let conn = Connection::open(&db_path)?;
+    let key_hex = hex::encode(crate::crypto::db_encryption_key(app_dir).map_err(to_sql_error)?);
 
+    match open_encrypted(&db_path, &key_hex) {
+        Ok(conn) => init_schema(conn),
+        Err(err) if is_not_a_database(&err) && db_path.exists() => {
+            // Совместимость: БД создана до внедрения SQLCipher (plaintext).
+            // Переносим в зашифрованный файл и повторяем инициализацию.
+            match migrate_plaintext_to_encrypted(app_dir, &db_path, &key_hex) {
+                Ok(conn) => init_schema(conn),
+                Err(migrate_err) if is_not_a_database(&migrate_err) => {
+                    // БД не открывается ни текущим ключом, ни как plaintext:
+                    // файл зашифрован утраченным ключом устройства (например,
+                    // после полного wipe). Данные без ключей недоступны (§4.1),
+                    // поэтому сбрасываемся к чистому листу.
+                    let _ = std::fs::remove_file(&db_path);
+                    let _ = std::fs::remove_file(app_dir.join("soul.db-wal"));
+                    let _ = std::fs::remove_file(app_dir.join("soul.db-shm"));
+                    let _ = std::fs::remove_file(app_dir.join("soul.new"));
+                    let conn = open_encrypted(&db_path, &key_hex)?;
+                    init_schema(conn)
+                }
+                Err(other) => Err(other),
+            }
+        }
+        Err(err) => Err(err),
+    }
+}
+
+/// Конвертирует строковую ошибку (например, от операций с файлами) в
+/// rusqlite::Error, чтобы не менять сигнатуры публичных функций.
+fn to_sql_error(msg: String) -> rusqlite::Error {
+    rusqlite::Error::SqliteFailure(
+        rusqlite::ffi::Error::new(rusqlite::ErrorCode::Unknown as i32),
+        Some(msg),
+    )
+}
+
+/// Открывает файл как зашифрованную БД SQLCipher и верифицирует ключ.
+fn open_encrypted(db_path: &std::path::Path, key_hex: &str) -> SqlResult<Connection> {
+    let conn = Connection::open(db_path)?;
+    conn.execute_batch(&format!("PRAGMA key = \"x'{key_hex}'\";"))?;
+    conn.query_row("SELECT count(*) FROM sqlite_master", [], |row| {
+        row.get::<_, i64>(0)
+    })?;
+    Ok(conn)
+}
+
+/// Перенос данных из унаследованной plaintext-БД в новый зашифрованный файл.
+/// Старый файл резервируется как `soul.db.bak` и удаляется после успеха.
+fn migrate_plaintext_to_encrypted(
+    app_dir: &std::path::Path,
+    db_path: &std::path::Path,
+    key_hex: &str,
+) -> SqlResult<Connection> {
+    let tmp_path = app_dir.join("soul.new");
+    if tmp_path.exists() {
+        std::fs::remove_file(&tmp_path)
+            .map_err(|e| to_sql_error(format!("Cleanup failed: {e}")))?;
+    }
+    {
+        let tmp = Connection::open(&tmp_path)?;
+        tmp.execute_batch(&format!("PRAGMA key = \"x'{key_hex}'\";"))?;
+        tmp.execute_batch("PRAGMA journal_mode=WAL;")?;
+        tmp.execute_batch("PRAGMA foreign_keys=OFF;")?;
+        tmp.execute_batch(BASE_SCHEMA_SQL)?;
+        add_column_if_missing(&tmp, "entities", "dedup_key", "TEXT")?;
+        add_column_if_missing(
+            &tmp,
+            "soul_state",
+            "preview_confirmed",
+            "INTEGER NOT NULL DEFAULT 0",
+        )?;
+        tmp.execute_batch(DEDUP_INDEX_SQL)?;
+
+        let old = Connection::open(db_path)?;
+        copy_all_tables(&old, &tmp)?;
+
+        // FTS создаётся после копирования: contentless-индекс пересобирается
+        // по текущим сущностям (rowid сохраняется построчным переносом).
+        init_fts(&tmp)?;
+        tmp.execute_batch("PRAGMA foreign_keys=ON;")?;
+    }
+
+    let bak_path = app_dir.join("soul.db.bak");
+    let _ = std::fs::remove_file(&bak_path);
+    let _ = std::fs::remove_file(app_dir.join("soul.db-wal"));
+    let _ = std::fs::remove_file(app_dir.join("soul.db-shm"));
+    std::fs::rename(db_path, &bak_path).map_err(|e| to_sql_error(format!("Swap failed: {e}")))?;
+    std::fs::rename(&tmp_path, db_path).map_err(|e| to_sql_error(format!("Swap failed: {e}")))?;
+    let _ = std::fs::remove_file(&bak_path);
+
+    open_encrypted(db_path, key_hex)
+}
+
+/// Переносит все обычные таблицы (кроме FTS-виртуальной) с сохранением rowid:
+/// FTS5-JOIN использует `entities.rowid = entity_fts.rowid`, поэтому rowid
+/// обязан совпадать один в один после миграции.
+fn copy_all_tables(old: &Connection, new: &Connection) -> SqlResult<()> {
+    let mut tables = Vec::new();
+    {
+        let mut stmt = old.prepare(
+            "SELECT name FROM sqlite_master WHERE type='table' AND name NOT LIKE 'sqlite_%' AND name != 'entity_fts' ORDER BY name",
+        )?;
+        let mut rows = stmt.query([])?;
+        while let Some(row) = rows.next()? {
+            tables.push(row.get::<_, String>(0)?);
+        }
+    }
+
+    for table in &tables {
+        let cols: Vec<String> = {
+            let mut cs = old.prepare(&format!("PRAGMA table_info(\"{table}\")"))?;
+            let mut crows = cs.query([])?;
+            let mut cols = Vec::new();
+            while let Some(cr) = crows.next()? {
+                cols.push(cr.get::<_, String>(1)?);
+            }
+            cols
+        };
+        if cols.is_empty() {
+            continue;
+        }
+        let quoted: Vec<String> = cols.iter().map(|c| format!("\"{c}\"")).collect();
+        let sel_sql = format!("SELECT rowid, {} FROM \"{table}\"", quoted.join(", "));
+        let ins_sql = format!(
+            "INSERT INTO \"{table}\" (rowid, {}) VALUES ({})",
+            quoted.join(", "),
+            (0..=cols.len()).map(|_| "?").collect::<Vec<_>>().join(", ")
+        );
+        let mut sel = old.prepare(&sel_sql)?;
+        let mut vals = sel.query([])?;
+        while let Some(row) = vals.next()? {
+            let mut params: Vec<rusqlite::types::Value> = Vec::with_capacity(cols.len() + 1);
+            params.push(rusqlite::types::Value::Integer(row.get::<_, i64>(0)?));
+            for i in 0..cols.len() {
+                params.push(row.get::<_, rusqlite::types::Value>(i + 1)?);
+            }
+            new.execute(&ins_sql, rusqlite::params_from_iter(params.iter()))?;
+        }
+    }
+    Ok(())
+}
+
+fn is_not_a_database(err: &rusqlite::Error) -> bool {
+    matches!(
+        err,
+        rusqlite::Error::SqliteFailure(e, _) if e.code == rusqlite::ErrorCode::NotADatabase
+    )
+}
+
+fn init_schema(conn: Connection) -> SqlResult<Connection> {
     conn.execute_batch("PRAGMA journal_mode=WAL;")?;
     conn.execute_batch("PRAGMA foreign_keys=ON;")?;
 
-    conn.execute_batch(
-        "CREATE TABLE IF NOT EXISTS souls (
+    conn.execute_batch(BASE_SCHEMA_SQL)?;
+
+    add_column_if_missing(&conn, "entities", "dedup_key", "TEXT")?;
+    add_column_if_missing(
+        &conn,
+        "soul_state",
+        "preview_confirmed",
+        "INTEGER NOT NULL DEFAULT 0",
+    )?;
+    conn.execute_batch(DEDUP_INDEX_SQL)?;
+
+    init_fts(&conn)?;
+
+    crate::eval::init_evaluations(&conn)?;
+    crate::policy::init_policies(&conn)?;
+    crate::gateway::init_gateway(&conn)?;
+
+    Ok(conn)
+}
+
+/// Базовая схема приложения (SQLCipher). Используется и при создании новой
+/// БД (init_schema), и при переносе унаследованной plaintext-БД.
+const BASE_SCHEMA_SQL: &str = "
+        CREATE TABLE IF NOT EXISTS souls (
             soul_id TEXT PRIMARY KEY,
             display_name TEXT NOT NULL,
             format_version TEXT NOT NULL DEFAULT '0.1.0',
@@ -106,39 +277,12 @@ pub fn init_db(app_dir: &std::path::Path) -> SqlResult<Connection> {
 
         CREATE INDEX IF NOT EXISTS idx_events_soul ON events(soul_id);
         CREATE INDEX IF NOT EXISTS idx_entities_soul ON entities(soul_id);
-        CREATE INDEX IF NOT EXISTS idx_entities_type ON entities(entity_type);",
-    )?;
+        CREATE INDEX IF NOT EXISTS idx_entities_type ON entities(entity_type);";
 
-    add_column_if_missing(&conn, "entities", "dedup_key", "TEXT")?;
-    add_column_if_missing(
-        &conn,
-        "soul_state",
-        "preview_confirmed",
-        "INTEGER NOT NULL DEFAULT 0",
-    )?;
-    conn.execute_batch(
-        "CREATE UNIQUE INDEX IF NOT EXISTS idx_entities_dedup
-         ON entities(soul_id, dedup_key) WHERE dedup_key IS NOT NULL;",
-    )?;
+const DEDUP_INDEX_SQL: &str = "CREATE UNIQUE INDEX IF NOT EXISTS idx_entities_dedup
+         ON entities(soul_id, dedup_key) WHERE dedup_key IS NOT NULL;";
 
-    init_fts(&conn)?;
-
-    crate::eval::init_evaluations(&conn)?;
-    crate::policy::init_policies(&conn)?;
-    crate::gateway::init_gateway(&conn)?;
-
-    Ok(conn)
-}
-
-/// Полнотекстовый индекс сущностей (SQLite FTS5, contentless).
-/// claim/evidence берутся из JSON-колонки data через json_extract; синхронизация
-/// поддерживается триггерами на все пути записи (add/update/import/wipe),
-/// поэтому FTS никогда не расходится с таблицей entities. Contentless-таблица
-/// выбрана потому, что внешний контент (content='entities') требует колонок
-/// с именами FTS-колонок, а данные лежат в JSON.
-fn init_fts(conn: &Connection) -> SqlResult<()> {
-    conn.execute_batch(
-        "CREATE VIRTUAL TABLE IF NOT EXISTS entity_fts USING fts5(
+const FTS_CREATE_SQL: &str = "CREATE VIRTUAL TABLE IF NOT EXISTS entity_fts USING fts5(
             id UNINDEXED,
             claim,
             evidence,
@@ -194,8 +338,16 @@ fn init_fts(conn: &Connection) -> SqlResult<()> {
                 new.entity_type,
                 new.status
             );
-        END;",
-    )?;
+        END;";
+
+/// Полнотекстовый индекс сущностей (SQLite FTS5, contentless).
+/// claim/evidence берутся из JSON-колонки data через json_extract; синхронизация
+/// поддерживается триггерами на все пути записи (add/update/import/wipe),
+/// поэтому FTS никогда не расходится с таблицей entities. Contentless-таблица
+/// выбрана потому, что внешний контент (content='entities') требует колонок
+/// с именами FTS-колонок, а данные лежат в JSON.
+fn init_fts(conn: &Connection) -> SqlResult<()> {
+    conn.execute_batch(FTS_CREATE_SQL)?;
 
     // Backfill только для пустого индекса (старые базы, созданные до появления
     // FTS): contentless-таблица не поддерживает 'rebuild', заполняем вручную.

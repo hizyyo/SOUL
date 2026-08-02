@@ -1084,6 +1084,13 @@ mod tests {
         let files: Vec<_> = std::fs::read_dir(&receipts_dir).unwrap().collect();
         assert_eq!(files.len(), 1);
 
+        // Эмуляция перезапуска приложения: соединение закрывается, и init_db
+        // должен без ключей (после wipe) получить чистую пустую базу.
+        let old = std::mem::replace(
+            &mut env.conn,
+            rusqlite::Connection::open_in_memory().unwrap(),
+        );
+        drop(old);
         let fresh = init_db(&env.dir).unwrap();
         assert!(list_souls(&fresh).unwrap().is_empty());
     }

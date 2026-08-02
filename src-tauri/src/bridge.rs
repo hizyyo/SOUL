@@ -55,11 +55,15 @@ pub const ERR_RUNTIME_ERROR: &str = "runtime_error";
 /// бизнес-данные); если read-only открытие невозможно (WAL требует доступа
 /// к `-wal`/`-shm`), открывает read-write и запирает на чтение
 /// `PRAGMA query_only=ON` — SQLite не примет ни одной записи в таблицы.
+/// БД зашифрована SQLCipher (ключ — SHA-256 от ключа устройства).
 pub fn open_app_db(app_dir: &Path) -> Result<Connection, String> {
     let db_path = app_dir.join("soul.db");
+    let key_hex = hex::encode(crate::crypto::db_encryption_key(app_dir)?);
     let conn = Connection::open_with_flags(&db_path, OpenFlags::SQLITE_OPEN_READ_ONLY)
         .or_else(|_| Connection::open_with_flags(&db_path, OpenFlags::SQLITE_OPEN_READ_WRITE))
         .map_err(|_| format!("SOUL database not found at {}.", db_path.to_string_lossy()))?;
+    conn.execute_batch(&format!("PRAGMA key = \"x'{key_hex}'\";"))
+        .map_err(|e| format!("Cannot unlock SOUL database: {e}"))?;
     conn.pragma_update(None, "query_only", true)
         .map_err(|e| format!("Cannot enforce read-only database access: {e}"))?;
     Ok(conn)

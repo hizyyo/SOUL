@@ -202,3 +202,29 @@
 ## Коммит (project-wide ultra-review)
 
 - `e56dc2d` `fix(soul): project-wide ultra-review — trusted-sender gate in browser relay, atomic import wipe, calibration multi-select and save errors, MCP line cap + query_only, CSP, drop dead shell plugin [session-12]`
+
+---
+
+## SQLCipher: локальная БД зашифрована (§4.1)
+
+По решению пользователя требование §4.1 («локальная зашифрованная база SQLite» + «локальный ключ шифрования», §5.3 — шифрование обязательное базовое) закрыто полностью: SQLite заменён на SQLCipher, файл `soul.db` больше не читается без ключа.
+
+### Реализовано
+
+1. **Ключ из ключа устройства.** `crypto::db_encryption_key(app_dir)` — SHA-256 от приватного байта device keypair (ed25519) → 32-байтовый ключ SQLCipher. Пока существуют файлы ключей устройства — БД расшифровывается; отсутствие ключей (например, после полного wipe) делает данные недоступными — что требуется по §4.1.
+2. **rusqlite на `bundled-sqlcipher-vendored-openssl`** (Cargo.toml). SQLCipher собирается из исходников (нужен рабочий Strawberry Perl — системный git-perl неполный, отсутствуют модули; установлен `StrawberryPerl.StrawberryPerl 5.42.2.1`), OpenSSL — vendored.
+3. **Открытие с ключом** `open_encrypted`: `PRAGMA key = "x'<hex>';"` + проверка `sqlite_master` (кратный сбой доступа = NotADatabase).
+4. **Миграция унаследованной plaintext-БД** `migrate_plaintext_to_encrypted`: `soul.db` открывается как plaintext, в зашифрованный `soul.new` переносятся все таблицы `copy_all_tables` (построчно, **с сохранением rowid** — критично для JOIN `entities.rowid = entity_fts.rowid`), затем создаётся FTS и пересобирается из сущностей; swap файлов через `soul.db.bak`, после успеха `.bak` и stale `-wal`/`-shm` удаляются.
+5. **Сброс после потери ключей.** Если БД не открывается новым ключом и не читается как plaintext (зашифрована утраченным ключом после wipe) — файл удаляется, создаётся новая пустая зашифрованная БД (тест `wipe_removes_data_keys_and_writes_receipt` эмулирует перезапуск приложения после wipe).
+6. **Bridge и MCP тоже расшифровывают.** `open_app_db` в `bridge.rs`/`mcp.rs` применяет `PRAGMA key` (тот же ключ устройства) перед `query_only=ON`.
+
+### Проверка
+
+- `cargo test --lib`: **PASS** — 205 passed (включая E2E реального бинарника `soul-bridge`/`soul-mcp`, миграцию старой схемы, wipe→чистый старт).
+- `cargo clippy --all-targets`: **PASS** — без предупреждений. `cargo fmt`: **PASS**.
+- Требует полной пересборки SQLCipher/OpenSSL (вендорная сборка, минуты).
+
+### Примечание
+
+- Для ручной проверки через `sqlite3` файл `soul.db` теперь зашифрован: требуется `PRAGMA key`. Чтение зашифрованной БД в `bridge.rs`/`mcp.rs` идемпотентно к перезапуску приложения (ключ всегда тот же — от device keypair).
+- SQL-схема не менялась — изменились только построение файла и ключ; контракты/миграции таблиц не затронуты.

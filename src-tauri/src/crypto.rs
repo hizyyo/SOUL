@@ -187,6 +187,17 @@ pub fn sha256_hex(data: &[u8]) -> String {
     hex::encode(hasher.finalize())
 }
 
+/// Ключ шифрования локальной SQLite-БД (SQLCipher): SHA-256 от приватного
+/// ключа устройства. Пока существуют файлы device keypair — БД расшифровывается;
+/// отсутствие ключей (например, после полного wipe) делает данные недоступными,
+/// что и требуется по §4.1.
+pub fn db_encryption_key(app_dir: &Path) -> Result<[u8; KEY_LEN], String> {
+    let keys = ensure_device_keypair(app_dir)?;
+    let mut hasher = Sha256::new();
+    hasher.update(keys.private_bytes);
+    Ok(hasher.finalize().into())
+}
+
 pub fn ensure_password_valid(password: &str) -> Result<(), String> {
     if password.len() < 8 {
         return Err("Passphrase must be at least 8 characters.".into());
