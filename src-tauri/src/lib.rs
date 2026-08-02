@@ -497,19 +497,28 @@ fn evaluate_action_cmd(
     policy::evaluate(&conn, &action)
 }
 
+/// Ключ локального устройства для подписи capability и квитанций gateway.
+fn gateway_device_keys(app: &tauri::AppHandle) -> Result<crypto::DeviceKeys, String> {
+    let app_dir = app.path().app_data_dir().map_err(|e| e.to_string())?;
+    crypto::ensure_device_keypair(&app_dir)
+}
+
 #[tauri::command]
 fn gateway_propose_cmd(
     state: tauri::State<AppState>,
+    app: tauri::AppHandle,
     action_json: String,
     ttl_seconds: Option<u64>,
 ) -> Result<gateway::GatewayProposal, String> {
     let conn = state.conn.lock().map_err(|e| e.to_string())?;
-    gateway::propose_action(&conn, &action_json, ttl_seconds)
+    let keys = gateway_device_keys(&app)?;
+    gateway::propose_action(&conn, &keys, &action_json, ttl_seconds)
 }
 
 #[tauri::command]
 fn gateway_execute_cmd(
     state: tauri::State<AppState>,
+    app: tauri::AppHandle,
     capability_id: String,
     connector_id: String,
     account_id: String,
@@ -517,14 +526,27 @@ fn gateway_execute_cmd(
     action_json: String,
 ) -> Result<gateway::GatewayExecuteResult, String> {
     let conn = state.conn.lock().map_err(|e| e.to_string())?;
+    let keys = gateway_device_keys(&app)?;
     gateway::execute_capability(
         &conn,
+        &keys,
         &capability_id,
         &connector_id,
         &account_id,
         &environment,
         &action_json,
     )
+}
+
+#[tauri::command]
+fn gateway_confirm_cmd(
+    state: tauri::State<AppState>,
+    app: tauri::AppHandle,
+    capability_id: String,
+) -> Result<gateway::CapabilityInfo, String> {
+    let conn = state.conn.lock().map_err(|e| e.to_string())?;
+    let keys = gateway_device_keys(&app)?;
+    gateway::confirm_capability(&conn, &keys, &capability_id)
 }
 
 #[tauri::command]
@@ -541,6 +563,36 @@ fn list_gateway_capabilities_cmd(
 ) -> Result<Vec<gateway::CapabilityInfo>, String> {
     let conn = state.conn.lock().map_err(|e| e.to_string())?;
     gateway::list_capabilities(&conn)
+}
+
+#[tauri::command]
+fn list_gateway_connectors_cmd(
+    state: tauri::State<AppState>,
+) -> Result<Vec<gateway::GatewayChannel>, String> {
+    let conn = state.conn.lock().map_err(|e| e.to_string())?;
+    gateway::list_connectors(&conn)
+}
+
+#[tauri::command]
+fn gateway_add_connector_cmd(
+    state: tauri::State<AppState>,
+    connector_id: String,
+    account_id: String,
+    environment: String,
+) -> Result<gateway::GatewayChannel, String> {
+    let conn = state.conn.lock().map_err(|e| e.to_string())?;
+    gateway::add_connector(&conn, &connector_id, &account_id, &environment)
+}
+
+#[tauri::command]
+fn gateway_remove_connector_cmd(
+    state: tauri::State<AppState>,
+    connector_id: String,
+    account_id: String,
+    environment: String,
+) -> Result<bool, String> {
+    let conn = state.conn.lock().map_err(|e| e.to_string())?;
+    gateway::remove_connector(&conn, &connector_id, &account_id, &environment)
 }
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
@@ -594,8 +646,12 @@ pub fn run() {
             evaluate_action_cmd,
             gateway_propose_cmd,
             gateway_execute_cmd,
+            gateway_confirm_cmd,
             list_gateway_receipts_cmd,
             list_gateway_capabilities_cmd,
+            list_gateway_connectors_cmd,
+            gateway_add_connector_cmd,
+            gateway_remove_connector_cmd,
         ])
         .setup(|app| {
             let app_dir = app

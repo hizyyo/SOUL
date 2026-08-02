@@ -5,6 +5,13 @@
  * поддельный коннектор — никаких реальных внешних вызовов, никакого управления
  * произвольными внешними агентами. Rust — авторитетный источник правды; здесь
  * только типы, константы, лёгкая пред-проверка формы и UX-лейблы.
+ *
+ * Review-pass: capability привязывает канал (коннектор/учётка/окружение),
+ * подписана локальным устройством (ed25519); capability и квитанции несут
+ * подпись и флаг `signature_valid` (честный аудит подделок); статус `held`
+ * имеет продолжение — подтверждение пользователем; статус `redacted` имеет
+ * продолжение — поддельный коннектор получает отредактированную копию;
+ * реестр имитированных коннекторов управляется из интерфейса.
  */
 
 import type { Decision, Effect } from './policy';
@@ -28,6 +35,12 @@ export const SIMULATION_LABEL = 'Имитация: внешнее действи
 export const GATEWAY_DEFAULT_TTL = 300;
 export const GATEWAY_MAX_TTL = 3_600;
 export const MAX_ACTION_JSON_CHARS = 16_000;
+/** Лимиты реестра имитированных коннекторов (зеркало gateway.rs). */
+export const GATEWAY_MAX_CONNECTORS = 50;
+export const GATEWAY_MAX_CHANNEL_FIELD_CHARS = 64;
+
+/** Эффект решения при выдаче capability (зеркало gateway.rs). */
+export type GatewayDecisionEffect = 'allow' | 'require_confirmation' | 'redact';
 
 /** Локальная имитированная capability (gateway::CapabilityInfo). */
 export interface GatewayCapability {
@@ -39,6 +52,21 @@ export interface GatewayCapability {
   expires_at: string;
   created_at: string;
   used_at: string | null;
+  /** Канал, к которому capability привязана при выдаче. */
+  connector_id: string;
+  account_id: string;
+  environment: string;
+  /** Эффект решения при выдаче: allow / require_confirmation / redact. */
+  decision_effect: GatewayDecisionEffect;
+  /** Подтверждена ли capability пользователем (для require_confirmation). */
+  confirmed_by_user: boolean;
+  /** Действие выполнялось бы с отредактированной нагрузкой (redact). */
+  redacted: boolean;
+  /** Подпись локального устройства (base64, ed25519). */
+  signature: string;
+  signer_public_key: string;
+  /** Подпись проверена по сохранённому публичному ключу. */
+  signature_valid: boolean;
 }
 
 /** Квитанция gateway (gateway::GatewayReceipt) — без исходной нагрузки. */
@@ -55,6 +83,11 @@ export interface GatewayReceipt {
   reason: string | null;
   nonce: string | null;
   created_at: string;
+  /** Подпись локального устройства (base64, ed25519). */
+  signature: string;
+  signer_public_key: string;
+  /** Подпись проверена по сохранённому публичному ключу. */
+  signature_valid: boolean;
 }
 
 /** Результат этапа предложения (gateway::GatewayProposal). */
@@ -99,25 +132,49 @@ export const GATEWAY_STATUS_TONE: Record<GatewayStatus, { bg: string; fg: string
 
 /** Канал выполнения (коннектор, учётная запись, окружение). */
 export interface GatewayChannel {
-  connectorId: string;
-  accountId: string;
+  connector_id: string;
+  account_id: string;
   environment: string;
 }
 
 /**
- * Локальный реестр имитированных коннекторов — зеркало сида gateway.rs
- * (gateway_connectors). Канал должен быть в реестре, иначе выполнение
- * отказывается.
+ * Сид реестра имитированных коннекторов — зеркало seed gateway.rs. Живой
+ * реестр приходит из `list_gateway_connectors_cmd`; этот список — только
+ * начальные варианты (и фолбэк, пока реестр не загружен).
  */
 export const GATEWAY_CONNECTOR_OPTIONS: readonly GatewayChannel[] = [
-  { connectorId: 'demo-connector', accountId: 'acct-1', environment: 'production' },
-  { connectorId: 'demo-connector', accountId: 'acct-1', environment: 'staging' },
-  { connectorId: 'demo-connector', accountId: 'acct-2', environment: 'production' },
-  { connectorId: 'sandbox-connector', accountId: 'acct-1', environment: 'development' },
+  { connector_id: 'demo-connector', account_id: 'acct-1', environment: 'production' },
+  { connector_id: 'demo-connector', account_id: 'acct-1', environment: 'staging' },
+  { connector_id: 'demo-connector', account_id: 'acct-2', environment: 'production' },
+  { connector_id: 'sandbox-connector', account_id: 'acct-1', environment: 'development' },
 ];
 
 export function channelLabel(channel: GatewayChannel): string {
-  return `${channel.connectorId} · ${channel.accountId} · ${channel.environment}`;
+  return `${channel.connector_id} · ${channel.account_id} · ${channel.environment}`;
+}
+
+/** Пред-проверка полей канала перед отправкой в Rust (авторитет — бэкенд). */
+export function validateChannelInput(
+  connectorId: string,
+  accountId: string,
+  environment: string,
+): { ok: boolean; error: string | null } {
+  for (const [name, value] of [
+    ['connectorId', connectorId],
+    ['accountId', accountId],
+    ['environment', environment],
+  ] as const) {
+    if (value.trim().length === 0) {
+      return { ok: false, error: `Channel field '${name}' must not be empty.` };
+    }
+    if (value.trim().length > GATEWAY_MAX_CHANNEL_FIELD_CHARS) {
+      return {
+        ok: false,
+        error: `Channel field '${name}' exceeds ${GATEWAY_MAX_CHANNEL_FIELD_CHARS} characters.`,
+      };
+    }
+  }
+  return { ok: true, error: null };
 }
 
 /** Пример действия для Gateway-демо §4.11: покупка на $600 в production. */
@@ -168,14 +225,17 @@ export function validateActionJson(raw: string): { ok: boolean; error: string | 
   return { ok: true, error: null };
 }
 
-/** Состояние capability для UI: готова / использована / истекла. */
-export function capabilityState(cap: GatewayCapability): 'ready' | 'used' | 'expired' {
+/** Состояние capability для UI: удерживается / готова / использована / истекла. */
+export function capabilityState(cap: GatewayCapability): 'held' | 'ready' | 'used' | 'expired' {
   if (cap.used_at !== null) return 'used';
   if (Date.parse(cap.expires_at) < Date.now()) return 'expired';
+  if (cap.decision_effect === 'require_confirmation' && !cap.confirmed_by_user) {
+    return 'held';
+  }
   return 'ready';
 }
 
-/** Короткий отображаемый фрагмент хэша/nonce. */
+/** Короткий отображаемый фрагмент хэша/nonce/подписи. */
 export function shortDigest(value: string): string {
   return value.length > 12 ? `${value.slice(0, 12)}…` : value;
 }

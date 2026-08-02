@@ -94,6 +94,8 @@
 
 ## Известные ограничения
 
+> Устранены в review-pass ниже: канал привязан к capability, подпись и атомарность реализованы, confirm/redact имеют продолжение, реестр управляется из UI. Осталась только реальная изоляция учётных данных — сознательно P1 по §4.11.
+
 - Capability не содержит канал (коннектор/учётка/окружение): по спецификации она несёт только action id, hash, nonce, срок, однократность; канал проверяется по локальному реестру на этапе выполнения. Связывание канала с capability — P1.
 - `require_confirmation` и `redact` не имеют P0-продолжения: квитанция `held`/`redacted`, capability не выдаётся, поток подтверждения пользователем — P1.
 - Реальная изоляция учётных данных, криптоподпись capability и атомарное выполнение — P1 (§4.11). P0-имитация никогда не выдается за защиту production-уровня.
@@ -107,3 +109,45 @@
 ## Коммит
 
 - `5c2e2d81aaef1b9ea4edfc649651194830e628ec` `feat(soul): simulated gateway with capabilities and receipts [session-12]`
+
+---
+
+## Review-pass: устранены все ограничения и риски
+
+Исправлены все пункты «Известных ограничений» первой версии. Capability и квитанции теперь подписаны локальным устройством (ed25519) — это закрывает и пробел со спецификацией: §4.11 требует «подписанную локальную квитанцию» (шаг демо), а в первой версии квитанции не были подписаны.
+
+### Исправлено
+
+1. **Capability привязывает канал (было: «не содержит канал, P1»).** Колонки `connector_id/account_id/environment` в `capabilities`; канал берётся из действия при выдаче и обязан быть в локальном реестре (иначе предложение отклоняется: «Channel … is not in the simulated connector registry»). Выполнение с другим каналом — отказ «capability bound to different channel»; удаление канала из реестра после выдачи — отказ «connector mismatch» (fail-closed).
+2. **`require_confirmation` получил продолжение (было: «без P0-продолжения»).** Capability выдаётся в состоянии held (`confirmed_by_user = false`, квитанция `held`); новая команда `gateway_confirm_cmd` — локальное подтверждение пользователем (квитанция `held` → `pending`, переподпись capability, подпись покрывает состояние подтверждения); до подтверждения выполнение отказывается «confirmation required», отказ не сжигает capability. Повторное/лишнее подтверждение — ошибки.
+3. **`redact` получил продолжение (было: «без P0-продолжения»).** Capability выдаётся с отредактированной копией действия (`redacted_json`): структурные поля сохраняются, чувствительные данные (получатель, домен, сумма, валюта, классы данных, scopes) скрыты. Поддельный коннектор «выполняет» именно отредактированный вариант (проверено: transaction_id соответствует hash отредактированного действия); квитанция — `simulated` с пометкой «payload redacted; no data exposed», эффект решения `redact` сохраняется.
+4. **Криптоподпись capability и квитанций (было: «P1»).** Подпись ed25519 ключом локального устройства (существующий `crypto::ensure_device_keypair`, каталог keys) поверх канонического сообщения (все неизменяемые поля, включая канал и эффект решения). Подпись capability проверяется при выполнении **до** всех остальных проверок — любое вмешательство в строку (срок, канал, hash, nonce) → отказ «invalid capability signature» (fail-closed, проверено тестами). Квитанции подписываются при каждой записи (включая обновления held→pending и pending→simulated); при чтении подпись проверяется и в API отдаётся честный флаг `signature_valid` — подделанная квитанция не скрывается, а помечается (проверено тестом).
+5. **Атомарное выполнение (было: «P1»).** Успешный путь (пометка `used_at` + обновление квитанции до `simulated`) и подтверждение (флаг + квитанция `held`→`pending`) — в одной транзакции `unchecked_transaction`. Отказ оставляет ровно одну квитанцию `refused`.
+6. **Реестр каналов управляется из интерфейса (было: «статический сид»).** `list_gateway_connectors_cmd`, `gateway_add_connector_cmd`, `gateway_remove_connector_cmd` + секция «Реестр имитированных коннекторов» в UI (добавление/удаление каналов). Ограничения: пустые поля отклоняются, ≤64 символов на поле, ≤50 каналов (MAX_GATEWAY_CONNECTORS), добавление идемпотентно. Это по-прежнему локальная имитация — никаких реальных агентов.
+7. **Повторная оценка политики при выполнении.** Жёсткий блок — только `Deny` (законное продолжение: для held/redact-capability политика на момент выполнения возвращает `require_confirmation`/`redact`, что уже согласовано на этапе выдачи; отказом это не является).
+
+### Изменённые файлы (review-pass)
+
+- `src-tauri/src/gateway.rs` — канал в capability, подпись (capability + квитанции), `confirm_capability`, redact-продолжение, транзакции, CRUD реестра, миграция `ensure_column` (ALTER TABLE ADD COLUMN для БД первой версии), 35 тестов.
+- `src-tauri/src/lib.rs` — `gateway_device_keys(app)`; команды получают `app: AppHandle` и ключи; + `gateway_confirm_cmd`, `list_gateway_connectors_cmd`, `gateway_add_connector_cmd`, `gateway_remove_connector_cmd`.
+- `src/data/gateway.ts` — `GatewayCapability` (канал, `decision_effect`, `confirmed_by_user`, `redacted`, подпись, `signature_valid`), `GatewayReceipt` (подпись, `signature_valid`), `GatewayChannel` (snake_case), `validateChannelInput`, `capabilityState` → `held`, лимиты реестра.
+- `src/pages/GatewaySection.tsx` — подтверждение held-capability кнопкой «Подтвердить (пользователь)», живой реестр (список/добавить/удалить), селект канала из реестра, бейджи подписи «✓ подписано / ✕ подпись недействительна».
+- `tests/gateway.test.ts` — +5 тестов (проверка канала, held-состояние, лимиты реестра).
+- `docs/session-log/SESSION-12.md` — этот раздел.
+
+### Тесты (review-pass)
+
+- `cargo test --lib`: **PASS** — 200 passed (35 gateway: привязка канала ×3 + удалённый из реестра канал, подделка подписи capability (срок/канал) → «invalid capability signature», подделка квитанции → `signature_valid=false`, confirm-поток ×5, redact-продолжение, CRUD реестра ×2, предложение для канала вне реестра, регресс первого прохода).
+- `cargo clippy --all-targets`: **PASS** — без предупреждений.
+- `cargo fmt --check`: **PASS**.
+- `cargo build`: **PASS**.
+- `pnpm test`: **PASS** — 226 passed (17 gateway).
+- `pnpm typecheck` / `pnpm lint` / `pnpm format` / `pnpm build`: **PASS**.
+
+### Остаточные ограничения (сознательно P1)
+
+- Реальная изоляция учётных данных (настоящие внешние коннекторы, криденшелы вне процесса) — явно P1 по §4.11 («Настоящая изоляция учётных данных … относятся к P1»); P0-имитация не выдаётся за защиту production-уровня, метка §4.11 сохранена. Локальная атомарность и подпись закрывают целостность в границах P0, но не заменяют изоляцию P1.
+
+## Коммит (review-pass)
+
+- `bd0b155` `fix(soul): review-pass session-12 — channel-bound signed capabilities, confirmation flow, redaction continuation, atomic execution, editable connector registry [session-12]`

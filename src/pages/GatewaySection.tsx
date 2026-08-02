@@ -9,6 +9,7 @@ import {
   gatewayStatusLabel,
   channelLabel,
   validateActionJson,
+  validateChannelInput,
   capabilityState,
   shortDigest,
   type GatewayCapability,
@@ -60,6 +61,14 @@ const BTN: CSSProperties = {
   fontSize: '14px',
 };
 
+const BTN_SMALL: CSSProperties = {
+  ...BTN,
+  padding: '4px 10px',
+  fontSize: '12px',
+  background: '#f3f4f6',
+  color: '#374151',
+};
+
 const INPUT: CSSProperties = {
   width: '100%',
   padding: '8px',
@@ -94,11 +103,42 @@ function StatusBadge({ status }: { status: GatewayStatus }) {
   );
 }
 
-function CapabilityCard({ cap }: { cap: GatewayCapability }) {
+function SignatureBadge({ valid }: { valid: boolean }) {
+  return valid ? (
+    <span style={{ color: '#047857', fontSize: '12px', fontWeight: 600 }}>✓ подписано</span>
+  ) : (
+    <span style={{ color: '#dc2626', fontSize: '12px', fontWeight: 600 }}>
+      ✕ подпись недействительна
+    </span>
+  );
+}
+
+function CapabilityCard({
+  cap,
+  onConfirm,
+  busy,
+}: {
+  cap: GatewayCapability;
+  onConfirm?: (cap: GatewayCapability) => void;
+  busy?: boolean;
+}) {
   const state = capabilityState(cap);
   const stateLabel =
-    state === 'used' ? 'использована' : state === 'expired' ? 'истекла' : 'активна';
-  const color = state === 'ready' ? '#047857' : state === 'used' ? '#b45309' : '#dc2626';
+    state === 'used'
+      ? 'использована'
+      : state === 'expired'
+        ? 'истекла'
+        : state === 'held'
+          ? 'удерживается (требует подтверждения)'
+          : 'активна';
+  const color =
+    state === 'ready'
+      ? '#047857'
+      : state === 'used'
+        ? '#b45309'
+        : state === 'held'
+          ? '#c2410c'
+          : '#dc2626';
   return (
     <div
       style={{
@@ -119,9 +159,33 @@ function CapabilityCard({ cap }: { cap: GatewayCapability }) {
       <div style={{ color: '#555' }}>
         nonce: {shortDigest(cap.nonce)} · hash нагрузки: {shortDigest(cap.payload_hash)}
       </div>
+      <div style={{ color: '#555' }}>
+        канал (привязан): {channelLabel(cap)}
+        {cap.redacted ? ' · данные скрыты (redact)' : ''}
+      </div>
       <div style={{ color: '#888', fontSize: '12px' }}>
         срок: {cap.expires_at.slice(0, 19).replace('T', ' ')}
         {cap.used_at ? ` · использована: ${cap.used_at.slice(0, 19).replace('T', ' ')}` : ''}
+      </div>
+      <div
+        style={{
+          marginTop: '6px',
+          display: 'flex',
+          gap: '8px',
+          alignItems: 'center',
+          flexWrap: 'wrap',
+        }}
+      >
+        <SignatureBadge valid={cap.signature_valid} />
+        {state === 'held' && onConfirm && (
+          <button
+            onClick={() => onConfirm(cap)}
+            style={{ ...BTN_SMALL, background: '#f59e0b', color: '#fff' }}
+            disabled={busy}
+          >
+            Подтвердить (пользователь)
+          </button>
+        )}
       </div>
     </div>
   );
@@ -136,11 +200,12 @@ export function GatewaySection() {
 
   const [channel, setChannel] = useState<GatewayChannel>(
     GATEWAY_CONNECTOR_OPTIONS[0] ?? {
-      connectorId: 'demo-connector',
-      accountId: 'acct-1',
+      connector_id: 'demo-connector',
+      account_id: 'acct-1',
       environment: 'production',
     },
   );
+  const [connectors, setConnectors] = useState<GatewayChannel[]>([]);
   const [execution, setExecution] = useState<GatewayExecuteResult | null>(null);
   const [executeError, setExecuteError] = useState<string | null>(null);
 
@@ -148,14 +213,24 @@ export function GatewaySection() {
   const [capabilities, setCapabilities] = useState<GatewayCapability[]>([]);
   const [loadError, setLoadError] = useState<string | null>(null);
 
+  // Реестр каналов (добавление)
+  const [newConnectorId, setNewConnectorId] = useState('');
+  const [newAccountId, setNewAccountId] = useState('');
+  const [newEnvironment, setNewEnvironment] = useState('');
+  const [registryError, setRegistryError] = useState<string | null>(null);
+
+  const channelOptions = connectors.length > 0 ? connectors : GATEWAY_CONNECTOR_OPTIONS;
+
   const refresh = useCallback(async () => {
     try {
-      const [r, c] = await Promise.all([
+      const [r, c, ch] = await Promise.all([
         invoke<GatewayReceipt[]>('list_gateway_receipts_cmd'),
         invoke<GatewayCapability[]>('list_gateway_capabilities_cmd'),
+        invoke<GatewayChannel[]>('list_gateway_connectors_cmd'),
       ]);
       setReceipts(r);
       setCapabilities(c);
+      setConnectors(ch);
       setLoadError(null);
     } catch (e) {
       setLoadError(String(e));
@@ -184,19 +259,11 @@ export function GatewaySection() {
       });
       setProposal(result);
       if (result.capability) {
-        const parsed = JSON.parse(actionJson) as Record<string, string>;
-        const match = GATEWAY_CONNECTOR_OPTIONS.find(
-          (c) =>
-            c.connectorId === parsed.connectorId &&
-            c.accountId === parsed.accountId &&
-            c.environment === parsed.environment,
-        ) ??
-          GATEWAY_CONNECTOR_OPTIONS[0] ?? {
-            connectorId: 'demo-connector',
-            accountId: 'acct-1',
-            environment: 'production',
-          };
-        setChannel(match);
+        setChannel({
+          connector_id: result.capability.connector_id,
+          account_id: result.capability.account_id,
+          environment: result.capability.environment,
+        });
       }
       await refresh();
     } catch (e) {
@@ -214,8 +281,8 @@ export function GatewaySection() {
     try {
       const result = await invoke<GatewayExecuteResult>('gateway_execute_cmd', {
         capabilityId: proposal.capability.id,
-        connectorId: channel.connectorId,
-        accountId: channel.accountId,
+        connectorId: channel.connector_id,
+        accountId: channel.account_id,
         environment: channel.environment,
         actionJson,
       });
@@ -223,6 +290,62 @@ export function GatewaySection() {
       await refresh();
     } catch (e) {
       setExecuteError(String(e));
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  const handleConfirm = async (cap: GatewayCapability) => {
+    setBusy(true);
+    try {
+      const confirmed = await invoke<GatewayCapability>('gateway_confirm_cmd', {
+        capabilityId: cap.id,
+      });
+      setProposal((p) => (p ? { ...p, capability: confirmed } : p));
+      await refresh();
+    } catch (e) {
+      setProposeError(String(e));
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  const handleAddConnector = async () => {
+    setRegistryError(null);
+    const state = validateChannelInput(newConnectorId, newAccountId, newEnvironment);
+    if (!state.ok) {
+      setRegistryError(state.error ?? 'Invalid channel.');
+      return;
+    }
+    setBusy(true);
+    try {
+      await invoke<GatewayChannel>('gateway_add_connector_cmd', {
+        connectorId: newConnectorId.trim(),
+        accountId: newAccountId.trim(),
+        environment: newEnvironment.trim(),
+      });
+      setNewConnectorId('');
+      setNewAccountId('');
+      setNewEnvironment('');
+      await refresh();
+    } catch (e) {
+      setRegistryError(String(e));
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  const handleRemoveConnector = async (c: GatewayChannel) => {
+    setBusy(true);
+    try {
+      await invoke<boolean>('gateway_remove_connector_cmd', {
+        connectorId: c.connector_id,
+        accountId: c.account_id,
+        environment: c.environment,
+      });
+      await refresh();
+    } catch (e) {
+      setRegistryError(String(e));
     } finally {
       setBusy(false);
     }
@@ -246,8 +369,9 @@ export function GatewaySection() {
       </div>
       <p style={{ fontSize: '12px', color: '#666', margin: '0 0 12px' }}>
         Локальная имитация внешнего действия (§4.11): поддельный коннектор, без сети, без управления
-        произвольными внешними агентами. Настоящая изоляция учётных данных и атомарное выполнение —
-        P1; имитация P0 не является защитой production-уровня.
+        произвольными внешними агентами. Capability привязана к каналу и подписана локальным
+        устройством; квитанции подписаны. Настоящая изоляция учётных данных — P1; имитация P0 не
+        является защитой production-уровня.
       </p>
 
       {loadError && (
@@ -312,7 +436,7 @@ export function GatewaySection() {
             )}
           </div>
           {proposal.capability ? (
-            <CapabilityCard cap={proposal.capability} />
+            <CapabilityCard cap={proposal.capability} onConfirm={handleConfirm} busy={busy} />
           ) : (
             <p style={{ fontSize: '13px', color: '#b45309', margin: '8px 0 0' }}>
               Действие не разрешено — capability не выдана, коннектор не вызывался.
@@ -325,21 +449,19 @@ export function GatewaySection() {
         <div style={CARD}>
           <div style={{ ...LABEL, fontSize: '14px' }}>Выполнение через поддельный коннектор</div>
           <p style={{ fontSize: '12px', color: '#666', margin: '0 0 8px' }}>
-            Канал должен быть в локальном реестре имитированных коннекторов, иначе выполнение
-            откажется. При успехе capability сгорит (однократное использование); изменённая
-            нагрузка, повтор или просрочка — отказ.
+            Capability привязана к каналу {channelLabel(proposal.capability)}. Канал должен быть в
+            локальном реестре имитированных коннекторов. При успехе capability сгорит (однократное
+            использование); изменённая нагрузка, повтор, просрочка, другой канал — отказ.
           </p>
           <select
             value={channelLabel(channel)}
             onChange={(e) => {
-              const next = GATEWAY_CONNECTOR_OPTIONS.find(
-                (c) => channelLabel(c) === e.target.value,
-              );
+              const next = channelOptions.find((c) => channelLabel(c) === e.target.value);
               if (next) setChannel(next);
             }}
             style={{ ...INPUT, maxWidth: '360px', marginBottom: '8px' }}
           >
-            {GATEWAY_CONNECTOR_OPTIONS.map((c) => (
+            {channelOptions.map((c) => (
               <option key={channelLabel(c)} value={channelLabel(c)}>
                 {channelLabel(c)}
               </option>
@@ -369,6 +491,7 @@ export function GatewaySection() {
                 {execution.receipt.reason && (
                   <span style={{ color: '#6b7280' }}>{execution.receipt.reason}</span>
                 )}
+                <SignatureBadge valid={execution.receipt.signature_valid} />
               </div>
               {execution.receipt.message && (
                 <div style={{ color: '#555', marginTop: '4px' }}>{execution.receipt.message}</div>
@@ -380,6 +503,72 @@ export function GatewaySection() {
           )}
         </div>
       )}
+
+      <div style={CARD}>
+        <div style={{ ...LABEL, fontSize: '14px' }}>
+          Реестр имитированных коннекторов ({connectors.length})
+        </div>
+        <p style={{ fontSize: '12px', color: '#666', margin: '0 0 8px' }}>
+          Локальный реестр каналов для имитации: добавление/удаление управляет только поддельным
+          коннектором — никаких реальных агентов. Capability без канала в реестре не выдаётся.
+        </p>
+        {registryError && (
+          <div style={{ fontSize: '13px', color: '#dc2626', marginBottom: '8px' }}>
+            {registryError}
+          </div>
+        )}
+        <div
+          style={{
+            display: 'flex',
+            gap: '6px',
+            flexWrap: 'wrap',
+            marginBottom: '8px',
+            alignItems: 'center',
+          }}
+        >
+          <input
+            value={newConnectorId}
+            onChange={(e) => setNewConnectorId(e.target.value)}
+            placeholder="connectorId"
+            style={{ ...INPUT, maxWidth: '180px' }}
+          />
+          <input
+            value={newAccountId}
+            onChange={(e) => setNewAccountId(e.target.value)}
+            placeholder="accountId"
+            style={{ ...INPUT, maxWidth: '140px' }}
+          />
+          <input
+            value={newEnvironment}
+            onChange={(e) => setNewEnvironment(e.target.value)}
+            placeholder="environment"
+            style={{ ...INPUT, maxWidth: '140px' }}
+          />
+          <button onClick={() => void handleAddConnector()} style={BTN} disabled={busy}>
+            Добавить канал
+          </button>
+        </div>
+        {connectors.length === 0 && <p style={{ fontSize: '13px', color: '#666' }}>Реестр пуст.</p>}
+        {channelOptions.map((c) => (
+          <div
+            key={channelLabel(c)}
+            style={{
+              display: 'flex',
+              gap: '8px',
+              alignItems: 'center',
+              justifyContent: 'space-between',
+              padding: '6px 0',
+              borderTop: '1px solid #eee',
+              fontSize: '13px',
+            }}
+          >
+            <span>{channelLabel(c)}</span>
+            <button onClick={() => void handleRemoveConnector(c)} style={BTN_SMALL} disabled={busy}>
+              Удалить
+            </button>
+          </div>
+        ))}
+      </div>
 
       <div style={CARD}>
         <div style={{ ...LABEL, fontSize: '14px' }}>Квитанции ({receipts.length})</div>
@@ -401,6 +590,7 @@ export function GatewaySection() {
               <span style={{ color: '#888', fontSize: '12px' }}>
                 {r.created_at.slice(0, 19).replace('T', ' ')}
               </span>
+              <SignatureBadge valid={r.signature_valid} />
             </div>
             <div style={{ color: '#888', fontSize: '12px', marginTop: '2px' }}>
               {r.kind}
@@ -417,7 +607,7 @@ export function GatewaySection() {
           <p style={{ fontSize: '13px', color: '#666' }}>Capabilities пока нет.</p>
         )}
         {capabilities.slice(0, 10).map((c) => (
-          <CapabilityCard key={c.id} cap={c} />
+          <CapabilityCard key={c.id} cap={c} onConfirm={handleConfirm} busy={busy} />
         ))}
       </div>
     </div>
