@@ -382,16 +382,33 @@ pub fn list_evaluations(conn: &Connection, soul_id: &str) -> Result<Vec<Evaluati
     Ok(out)
 }
 
-pub fn delete_evaluation(conn: &Connection, evaluation_id: &str) -> Result<(), String> {
-    let n = conn
-        .execute(
-            "DELETE FROM evaluations WHERE id = ?1",
-            params![evaluation_id],
-        )
-        .map_err(|e| format!("evaluation delete failed: {e}"))?;
-    if n == 0 {
-        return Err("Evaluation not found.".to_string());
+pub fn delete_evaluation(
+    conn: &Connection,
+    soul_id: &str,
+    evaluation_id: &str,
+) -> Result<(), String> {
+    let owner: Result<String, rusqlite::Error> = conn.query_row(
+        "SELECT soul_id FROM evaluations WHERE id = ?1",
+        params![evaluation_id],
+        |r| r.get(0),
+    );
+    match owner {
+        Err(rusqlite::Error::QueryReturnedNoRows) => {
+            return Err("Evaluation not found.".to_string());
+        }
+        Err(e) => return Err(format!("evaluation delete failed: {e}")),
+        Ok(owner_soul) if owner_soul != soul_id => {
+            // Изоляция между SOUL: чужую оценку нельзя удалить; тот же ответ,
+            // что и для несуществующей, — без раскрытия наличия.
+            return Err("Evaluation not found.".to_string());
+        }
+        Ok(_) => {}
     }
+    conn.execute(
+        "DELETE FROM evaluations WHERE id = ?1",
+        params![evaluation_id],
+    )
+    .map_err(|e| format!("evaluation delete failed: {e}"))?;
     Ok(())
 }
 
@@ -653,11 +670,31 @@ mod tests {
         let (sid, scen, domain, s_a, b_a, _) = base_args(&soul_id);
         let row = create_evaluation_with_slot(&env.conn, sid, scen, "Q?", domain, s_a, b_a, "a");
 
-        delete_evaluation(&env.conn, &row.id).unwrap();
+        delete_evaluation(&env.conn, &soul_id, &row.id).unwrap();
         assert!(list_evaluations(&env.conn, &soul_id).unwrap().is_empty());
 
-        let err = delete_evaluation(&env.conn, &row.id).unwrap_err();
+        let err = delete_evaluation(&env.conn, &soul_id, &row.id).unwrap_err();
         assert!(err.contains("not found"), "unexpected error: {err}");
+    }
+
+    #[test]
+    fn delete_foreign_evaluation_is_rejected() {
+        let env = TestEnv::new();
+        let soul_a = seed_soul(&env);
+        let soul_b = create_soul(&env.conn, "Другая", "device_e")
+            .unwrap()
+            .soul_id;
+        let (sid, scen, domain, s_a, b_a, _) = base_args(&soul_a);
+        let row = create_evaluation_with_slot(&env.conn, sid, scen, "Q?", domain, s_a, b_a, "a");
+
+        // Чужая душа не может удалить оценку soul_a; ответ не раскрывает
+        // существование записи (изоляция между SOUL).
+        let err = delete_evaluation(&env.conn, &soul_b, &row.id).unwrap_err();
+        assert!(err.contains("not found"), "unexpected error: {err}");
+        assert_eq!(list_evaluations(&env.conn, &soul_a).unwrap().len(), 1);
+
+        delete_evaluation(&env.conn, &soul_a, &row.id).unwrap();
+        assert!(list_evaluations(&env.conn, &soul_a).unwrap().is_empty());
     }
 
     #[test]

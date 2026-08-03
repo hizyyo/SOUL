@@ -2069,6 +2069,91 @@ mod tests {
         assert!(a.status == "ok");
     }
 
+    #[test]
+    fn property_propose_execute_roundtrip_replay_and_determinism() {
+        use rand::rngs::StdRng;
+        use rand::{Rng, SeedableRng};
+        let env = TestEnv::new();
+        let mut rng = StdRng::seed_from_u64(0x51a0_1e13);
+        let kinds = [
+            "notes.create",
+            "notes.read",
+            "calendar.read",
+            "slack.post",
+            "email.send",
+            "purchase.create",
+        ];
+        let mut nonces = std::collections::HashSet::new();
+        let mut executed = 0usize;
+        let mut denied = 0usize;
+
+        for i in 0..60 {
+            let action = SoulAction {
+                action_id: format!("act_prop_{i}"),
+                kind: kinds[rng.gen_range(0..kinds.len())].to_string(),
+                actor: "agent-prop".to_string(),
+                connector_id: "demo-connector".to_string(),
+                account_id: "acct-1".to_string(),
+                environment: "production".to_string(),
+                recipient: None,
+                domain: Some("shopping".to_string()),
+                amount: Some(rng.gen_range(0.0..400.0)),
+                currency: Some("USD".to_string()),
+                data_classes: vec![],
+                reversible: true,
+                confirmed_by_user: true,
+                requested_scopes: vec![],
+                payload_hash: String::new(),
+            };
+            let json = serde_json::to_string(&action).unwrap();
+            let proposal = propose_action(&env.conn, &env.keys, &json, Some(300)).unwrap();
+
+            let Some(cap) = proposal.capability.as_ref() else {
+                assert_eq!(proposal.decision.effect, Effect::Deny);
+                denied += 1;
+                continue;
+            };
+            assert!(nonces.insert(cap.nonce.clone()), "nonce must be unique");
+
+            // Детерминизм хэша: тот же JSON → тот же payload_hash.
+            let hash1 = payload_hash_of(&normalize_action(&json).unwrap());
+            let hash2 = payload_hash_of(&normalize_action(&json).unwrap());
+            assert_eq!(hash1, hash2);
+            assert_eq!(cap.payload_hash, hash1);
+
+            let result = execute_ok(&env, &cap.id, &json);
+            assert!(
+                result.ok,
+                "allowed action must execute: {}",
+                result.receipt.reason.clone().unwrap_or_default()
+            );
+            assert!(result.receipt.signature_valid, "receipt must be signed");
+            assert!(result.receipt.connector_executed);
+            executed += 1;
+
+            // Повторное исполнение той же capability всегда отказывается.
+            let again = execute_ok(&env, &cap.id, &json);
+            assert!(!again.ok);
+            assert_eq!(
+                again.receipt.reason.as_deref(),
+                Some("capability already used")
+            );
+        }
+
+        assert!(
+            executed >= 40,
+            "most random allowed actions must execute: {executed}"
+        );
+
+        // Квитанции: по одной на propose (allow) + по одной refused-квитанции
+        // на попытку повтора, + по одной на каждый deny-propose.
+        let receipts = list_receipts(&env.conn).unwrap();
+        assert_eq!(receipts.len(), executed * 2 + denied);
+        for r in &receipts {
+            assert!(r.signature_valid, "receipt must verify");
+        }
+    }
+
     // ---------- require_confirmation: поток подтверждения ----------
 
     #[test]

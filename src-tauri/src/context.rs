@@ -12,6 +12,61 @@ pub const CONTEXT_POLICY_VERSION: &str = "soul-context-policy/1";
 pub const CONTEXT_STANDARD_TOKENS: u64 = 900;
 pub const CONTEXT_HARD_MAX_TOKENS: u64 = 3000;
 
+/// Пределы запроса к контексту на границе локального IPC (MCP/bridge):
+/// защита от oversized-строк и массивов фильтров. Значения зеркалят лимит
+/// bridge-задачи; запросы сверх них отклоняются ещё до компиляции.
+pub const QUERY_MAX_TEXT_CHARS: usize = 8_000;
+pub const QUERY_MAX_FILTER_ENTRIES: usize = 64;
+pub const QUERY_MAX_FILTER_TOTAL: usize = 200;
+pub const QUERY_MAX_ENTRY_CHARS: usize = 256;
+pub const QUERY_MAX_TIMESTAMP_CHARS: usize = 64;
+
+/// Валидация запроса на границе IPC: детерминированная, без побочных
+/// эффектов. Точный список ошибок, а не молчаливое усечение, — клиент
+/// получает понятный ответ.
+pub fn validate_query(query: &ContextQuery) -> Result<(), String> {
+    if query.text.chars().count() > QUERY_MAX_TEXT_CHARS {
+        return Err(format!(
+            "Query text is too long (limit {QUERY_MAX_TEXT_CHARS} characters)."
+        ));
+    }
+    let mut total = 0usize;
+    let dimensions = [
+        ("domains", &query.domains),
+        ("projects", &query.projects),
+        ("people", &query.people),
+        ("channels", &query.channels),
+        ("sensitivity", &query.sensitivity),
+        ("statuses", &query.statuses),
+    ];
+    for (name, items) in dimensions {
+        if items.len() > QUERY_MAX_FILTER_ENTRIES {
+            return Err(format!(
+                "Query {name} filter is too large (limit {QUERY_MAX_FILTER_ENTRIES} entries)."
+            ));
+        }
+        total += items.len();
+        for entry in items {
+            if entry.chars().count() > QUERY_MAX_ENTRY_CHARS {
+                return Err(format!("Query {name} entry is too long."));
+            }
+        }
+    }
+    if total > QUERY_MAX_FILTER_TOTAL {
+        return Err(format!(
+            "Query filters exceed {QUERY_MAX_FILTER_TOTAL} total entries."
+        ));
+    }
+    for (name, value) in [("since", &query.since), ("until", &query.until)] {
+        if let Some(v) = value {
+            if v.chars().count() > QUERY_MAX_TIMESTAMP_CHARS {
+                return Err(format!("Query {name} is too long."));
+            }
+        }
+    }
+    Ok(())
+}
+
 const DEFAULT_ALLOWED_STATUSES: [&str; 1] = ["active"];
 const DEFAULT_ALLOWED_SENSITIVITY: [&str; 4] = ["public", "internal", "private", "sensitive"];
 const ALL_SENSITIVITY: [&str; 5] = ["public", "internal", "private", "sensitive", "restricted"];

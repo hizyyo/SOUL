@@ -243,7 +243,10 @@ export function Tests({ soul, entities }: Props) {
     if (!soul) return;
     setError(null);
     try {
-      await invoke('delete_evaluation_cmd', { evaluationId: id });
+      await invoke('delete_evaluation_cmd', {
+        soulId: soul.soul_id,
+        evaluationId: id,
+      });
       const list = await invoke<EvaluationRecord[]>('list_evaluations_cmd', {
         soulId: soul.soul_id,
       });

@@ -291,6 +291,7 @@ export function App() {
     setError(null);
     try {
       await invoke('update_entity_cmd', {
+        soulId: soul?.soul_id ?? '',
         entityId: id,
         status,
         deviceId,
@@ -339,6 +340,7 @@ export function App() {
       }
       data.claim = claim.trim();
       await invoke('update_entity_cmd', {
+        soulId: soul.soul_id,
         entityId: id,
         status: 'candidate',
         data: JSON.stringify(data),

@@ -209,6 +209,9 @@ pub fn ensure_password_valid(password: &str) -> Result<(), String> {
 }
 
 pub fn read_file_limited(path: &Path, max_bytes: usize) -> Result<Vec<u8>, String> {
+    if path.to_string_lossy().contains('\0') {
+        return Err("File path must not contain NUL characters.".to_string());
+    }
     let meta = fs::metadata(path).map_err(|e| format!("Cannot read file: {e}"))?;
     if meta.len() as usize > max_bytes {
         return Err(format!("File is too large (limit {max_bytes} bytes)."));

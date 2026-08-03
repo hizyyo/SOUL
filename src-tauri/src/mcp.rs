@@ -317,6 +317,7 @@ fn handle_tool_call(msg: &serde_json::Map<String, Value>, app_dir: &Path) -> Val
 /// Ядро `soul.get_context`: read-only чтение БД → детерминированная компиляция
 /// → disclosure receipt → ответ клиенту.
 pub fn get_context(app_dir: &Path, query: &ContextQuery) -> Result<Value, String> {
+    context::validate_query(query)?;
     let conn = open_app_db(app_dir)?;
     let entities: Vec<context::ContextEntity> = {
         let souls = db::list_souls(&conn).map_err(|e| format!("Cannot read SOUL database: {e}"))?;
@@ -571,6 +572,49 @@ mod tests {
         // Невалидные аргументы → isError, а не крах сервера.
         let res = call(r#"{"maxTokens":"big"}"#).expect("response");
         assert_eq!(res["result"]["isError"], true);
+    }
+
+    #[test]
+    fn get_context_rejects_oversized_query_params() {
+        let env = TestEnv::new();
+        let call = |args: &str| {
+            send(
+                &env,
+                &format!(
+                    r#"{{"jsonrpc":"2.0","id":8,"method":"tools/call","params":{{"name":"soul.get_context","arguments":{args}}}}}"#
+                ),
+            )
+        };
+        let expect_err = |res: Option<Value>, needle: &str| {
+            let res = res.expect("response");
+            assert_eq!(res["result"]["isError"], true, "expected error: {res}");
+            let text = res["result"]["content"][0]["text"].as_str().unwrap();
+            assert!(text.contains(needle), "expected {needle} in: {text}");
+        };
+
+        let huge_text = format!(r#"{{"text":"{}"}}"#, "x".repeat(8001));
+        expect_err(call(&huge_text), "too long");
+
+        let huge_domains = format!(
+            r#"{{"domains":{}}}"#,
+            serde_json::to_string(&vec!["d".to_string(); 65]).unwrap()
+        );
+        expect_err(call(&huge_domains), "too large");
+
+        let many_entries = format!(
+            r#"{{"domains":{},"projects":{},"people":{},"channels":{}}}"#,
+            serde_json::to_string(&vec!["d".to_string(); 64]).unwrap(),
+            serde_json::to_string(&vec!["p".to_string(); 64]).unwrap(),
+            serde_json::to_string(&vec!["o".to_string(); 64]).unwrap(),
+            serde_json::to_string(&vec!["c".to_string(); 17]).unwrap()
+        );
+        expect_err(call(&many_entries), "total entries");
+
+        let long_entry = format!(r#"{{"domains":["{}"]}}"#, "e".repeat(257));
+        expect_err(call(&long_entry), "too long");
+
+        let long_since = format!(r#"{{"since":"{}"}}"#, "s".repeat(65));
+        expect_err(call(&long_since), "too long");
     }
 
     #[test]

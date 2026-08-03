@@ -813,7 +813,9 @@ const MAX_CLAIM_CHARS: usize = 2000;
 
 const P0_ENTITY_TYPES: [&str; 5] = ["preference", "decision", "boundary", "goal", "fact"];
 
-fn validate_entity_type_value(entity_type: &str) -> Result<(), String> {
+/// Используется и при импорте пакета (package::verify_entities), поэтому
+/// видимость crate-уровня.
+pub(crate) fn validate_entity_type_value(entity_type: &str) -> Result<(), String> {
     if P0_ENTITY_TYPES.contains(&entity_type) {
         Ok(())
     } else {
@@ -821,7 +823,7 @@ fn validate_entity_type_value(entity_type: &str) -> Result<(), String> {
     }
 }
 
-fn validate_status_value(status: &str) -> Result<(), String> {
+pub(crate) fn validate_status_value(status: &str) -> Result<(), String> {
     if matches!(status, "candidate" | "active" | "rejected") {
         Ok(())
     } else {
@@ -829,7 +831,7 @@ fn validate_status_value(status: &str) -> Result<(), String> {
     }
 }
 
-fn validate_entity_data_json(data: &str) -> Result<(), String> {
+pub(crate) fn validate_entity_data_json(data: &str) -> Result<(), String> {
     let value: serde_json::Value =
         serde_json::from_str(data).map_err(|_| "Entity data must be valid JSON.".to_string())?;
     if !value.is_object() {
@@ -902,6 +904,7 @@ pub fn append_event(conn: &Connection, ev: &NewEvent) -> SqlResult<String> {
 
 pub fn update_entity(
     conn: &Connection,
+    soul_id: &str,
     entity_id: &str,
     status: &str,
     data: Option<&str>,
@@ -914,6 +917,11 @@ pub fn update_entity(
     let existing = get_entity(&tx, entity_id)
         .map_err(|e| e.to_string())?
         .ok_or("Entity not found.".to_string())?;
+    if existing.soul_id != soul_id {
+        // Изоляция между SOUL, §5.9: чужую сущность нельзя редактировать.
+        // Тот же ответ, что и при отсутствии сущности, — без раскрытия наличия.
+        return Err("Entity not found.".to_string());
+    }
 
     let from = existing.status.as_str();
     let is_edit = from == "candidate" && status == "candidate";
@@ -1329,7 +1337,7 @@ mod tests {
             .unwrap()
             .head_event_hash;
 
-        let row = update_entity(&env.conn, &ent_id, "active", None, "device_t").unwrap();
+        let row = update_entity(&env.conn, &soul_id, &ent_id, "active", None, "device_t").unwrap();
         assert_eq!(row.status, "active");
         assert_eq!(
             row.data,
@@ -1354,19 +1362,19 @@ mod tests {
         let env = TestEnv::new();
         let (soul_id, ent_id) = seed(&env);
 
-        update_entity(&env.conn, &ent_id, "rejected", None, "device_t").unwrap();
+        update_entity(&env.conn, &soul_id, &ent_id, "rejected", None, "device_t").unwrap();
         assert_eq!(
             get_entity(&env.conn, &ent_id).unwrap().unwrap().status,
             "rejected"
         );
 
-        update_entity(&env.conn, &ent_id, "candidate", None, "device_t").unwrap();
+        update_entity(&env.conn, &soul_id, &ent_id, "candidate", None, "device_t").unwrap();
         assert_eq!(
             get_entity(&env.conn, &ent_id).unwrap().unwrap().status,
             "candidate"
         );
 
-        update_entity(&env.conn, &ent_id, "active", None, "device_t").unwrap();
+        update_entity(&env.conn, &soul_id, &ent_id, "active", None, "device_t").unwrap();
         assert_eq!(
             get_entity(&env.conn, &ent_id).unwrap().unwrap().status,
             "active"
@@ -1381,10 +1389,11 @@ mod tests {
     #[test]
     fn rejected_cannot_be_activated_directly() {
         let env = TestEnv::new();
-        let (_, ent_id) = seed(&env);
-        update_entity(&env.conn, &ent_id, "rejected", None, "device_t").unwrap();
+        let (soul_id, ent_id) = seed(&env);
+        update_entity(&env.conn, &soul_id, &ent_id, "rejected", None, "device_t").unwrap();
 
-        let err = update_entity(&env.conn, &ent_id, "active", None, "device_t").unwrap_err();
+        let err =
+            update_entity(&env.conn, &soul_id, &ent_id, "active", None, "device_t").unwrap_err();
         assert!(err.contains("not allowed"), "unexpected error: {err}");
         assert_eq!(
             get_entity(&env.conn, &ent_id).unwrap().unwrap().status,
@@ -1395,24 +1404,27 @@ mod tests {
     #[test]
     fn active_cannot_be_rejected_directly() {
         let env = TestEnv::new();
-        let (_, ent_id) = seed(&env);
-        update_entity(&env.conn, &ent_id, "active", None, "device_t").unwrap();
+        let (soul_id, ent_id) = seed(&env);
+        update_entity(&env.conn, &soul_id, &ent_id, "active", None, "device_t").unwrap();
 
-        let err = update_entity(&env.conn, &ent_id, "rejected", None, "device_t").unwrap_err();
+        let err =
+            update_entity(&env.conn, &soul_id, &ent_id, "rejected", None, "device_t").unwrap_err();
         assert!(err.contains("not allowed"), "unexpected error: {err}");
     }
 
     #[test]
     fn unknown_status_is_rejected() {
         let env = TestEnv::new();
-        let (_, ent_id) = seed(&env);
+        let (soul_id, ent_id) = seed(&env);
 
-        let err = update_entity(&env.conn, &ent_id, "disputed", None, "device_t").unwrap_err();
+        let err =
+            update_entity(&env.conn, &soul_id, &ent_id, "disputed", None, "device_t").unwrap_err();
         assert!(
             err.contains("Unknown entity status"),
             "unexpected error: {err}"
         );
-        let err = update_entity(&env.conn, &ent_id, "deleted", None, "device_t").unwrap_err();
+        let err =
+            update_entity(&env.conn, &soul_id, &ent_id, "deleted", None, "device_t").unwrap_err();
         assert!(
             err.contains("Unknown entity status"),
             "unexpected error: {err}"
@@ -1422,9 +1434,9 @@ mod tests {
     #[test]
     fn confirm_preserves_existing_data() {
         let env = TestEnv::new();
-        let (_, ent_id) = seed(&env);
+        let (soul_id, ent_id) = seed(&env);
 
-        let row = update_entity(&env.conn, &ent_id, "active", None, "device_t").unwrap();
+        let row = update_entity(&env.conn, &soul_id, &ent_id, "active", None, "device_t").unwrap();
         assert_eq!(
             row.data,
             r#"{"claim":"Prefer concise","source":"calibration"}"#
@@ -1438,8 +1450,15 @@ mod tests {
 
         let new_data =
             r#"{"claim":"Prefer very concise answers","source":"calibration","confidence":0.9}"#;
-        let row =
-            update_entity(&env.conn, &ent_id, "candidate", Some(new_data), "device_t").unwrap();
+        let row = update_entity(
+            &env.conn,
+            &soul_id,
+            &ent_id,
+            "candidate",
+            Some(new_data),
+            "device_t",
+        )
+        .unwrap();
         assert_eq!(row.status, "candidate");
         assert_eq!(row.data, new_data);
 
@@ -1450,11 +1469,12 @@ mod tests {
     #[test]
     fn edit_active_entity_is_rejected() {
         let env = TestEnv::new();
-        let (_, ent_id) = seed(&env);
-        update_entity(&env.conn, &ent_id, "active", None, "device_t").unwrap();
+        let (soul_id, ent_id) = seed(&env);
+        update_entity(&env.conn, &soul_id, &ent_id, "active", None, "device_t").unwrap();
 
         let err = update_entity(
             &env.conn,
+            &soul_id,
             &ent_id,
             "active",
             Some(r#"{"claim":"changed"}"#),
@@ -1467,10 +1487,11 @@ mod tests {
     #[test]
     fn invalid_or_oversized_data_is_rejected() {
         let env = TestEnv::new();
-        let (_, ent_id) = seed(&env);
+        let (soul_id, ent_id) = seed(&env);
 
         let err = update_entity(
             &env.conn,
+            &soul_id,
             &ent_id,
             "candidate",
             Some("not json"),
@@ -1481,6 +1502,7 @@ mod tests {
 
         let err = update_entity(
             &env.conn,
+            &soul_id,
             &ent_id,
             "candidate",
             Some(r#"[1,2,3]"#),
@@ -1492,6 +1514,7 @@ mod tests {
         let long_claim = format!(r#"{{"claim":"{}"}}"#, "x".repeat(MAX_CLAIM_CHARS + 1));
         let err = update_entity(
             &env.conn,
+            &soul_id,
             &ent_id,
             "candidate",
             Some(&long_claim),
@@ -1504,10 +1527,11 @@ mod tests {
     #[test]
     fn unchanged_data_edit_is_rejected() {
         let env = TestEnv::new();
-        let (_, ent_id) = seed(&env);
+        let (soul_id, ent_id) = seed(&env);
 
         let err = update_entity(
             &env.conn,
+            &soul_id,
             &ent_id,
             "candidate",
             Some(r#"{"claim":"Prefer concise","source":"calibration"}"#),
@@ -1520,8 +1544,58 @@ mod tests {
     #[test]
     fn missing_entity_is_rejected() {
         let env = TestEnv::new();
-        let err = update_entity(&env.conn, "ent_missing", "active", None, "device_t").unwrap_err();
+        let err = update_entity(
+            &env.conn,
+            "soul_ghost",
+            "ent_missing",
+            "active",
+            None,
+            "device_t",
+        )
+        .unwrap_err();
         assert!(err.contains("not found"), "unexpected error: {err}");
+    }
+
+    #[test]
+    fn foreign_soul_cannot_update_entity() {
+        let env = TestEnv::new();
+        let (soul_a, ent_id) = seed(&env);
+        let soul_b = create_soul(&env.conn, "Другая", "device_t")
+            .unwrap()
+            .soul_id;
+
+        // Чужая душа не может ни активировать, ни редактировать сущность soul_a.
+        let err =
+            update_entity(&env.conn, &soul_b, &ent_id, "active", None, "device_t").unwrap_err();
+        assert_eq!(err, "Entity not found.", "unexpected error: {err}");
+        assert_eq!(
+            get_entity(&env.conn, &ent_id).unwrap().unwrap().status,
+            "candidate",
+            "entity must stay untouched"
+        );
+
+        let err = update_entity(
+            &env.conn,
+            &soul_b,
+            &ent_id,
+            "candidate",
+            Some(r#"{"claim":"evil"}"#),
+            "device_t",
+        )
+        .unwrap_err();
+        assert_eq!(err, "Entity not found.", "unexpected error: {err}");
+        assert_eq!(
+            get_entity(&env.conn, &ent_id).unwrap().unwrap().data,
+            r#"{"claim":"Prefer concise","source":"calibration"}"#,
+            "data must stay untouched"
+        );
+
+        // Своя душа по-прежнему может редактировать.
+        update_entity(&env.conn, &soul_a, &ent_id, "active", None, "device_t").unwrap();
+        assert_eq!(
+            get_entity(&env.conn, &ent_id).unwrap().unwrap().status,
+            "active"
+        );
     }
 
     #[test]
@@ -1529,7 +1603,8 @@ mod tests {
         let env = TestEnv::new();
         let (soul_id, ent_id) = seed(&env);
 
-        let err = update_entity(&env.conn, &ent_id, "candidate", None, "device_t").unwrap_err();
+        let err =
+            update_entity(&env.conn, &soul_id, &ent_id, "candidate", None, "device_t").unwrap_err();
         assert!(
             err.contains("already a candidate"),
             "unexpected error: {err}"
@@ -1587,8 +1662,8 @@ mod tests {
     fn event_chain_is_linked_via_previous_hashes() {
         let env = TestEnv::new();
         let (soul_id, ent_id) = seed(&env);
-        update_entity(&env.conn, &ent_id, "active", None, "device_t").unwrap();
-        update_entity(&env.conn, &ent_id, "candidate", None, "device_t").unwrap();
+        update_entity(&env.conn, &soul_id, &ent_id, "active", None, "device_t").unwrap();
+        update_entity(&env.conn, &soul_id, &ent_id, "candidate", None, "device_t").unwrap();
 
         let events = list_events(&env.conn, &soul_id).unwrap();
         assert!(events.len() >= 4);
@@ -2160,7 +2235,15 @@ mod tests {
             "device_t",
         )
         .unwrap();
-        update_entity(&env.conn, &rejected.id, "rejected", None, "device_t").unwrap();
+        update_entity(
+            &env.conn,
+            &soul_id,
+            &rejected.id,
+            "rejected",
+            None,
+            "device_t",
+        )
+        .unwrap();
 
         let mut with_rejected = ids.clone();
         with_rejected.push(rejected.id);
@@ -2176,7 +2259,7 @@ mod tests {
     fn activate_preview_skips_already_active_entities() {
         let env = TestEnv::new();
         let (soul_id, ids) = preview_seed(&env);
-        update_entity(&env.conn, &ids[0], "active", None, "device_t").unwrap();
+        update_entity(&env.conn, &soul_id, &ids[0], "active", None, "device_t").unwrap();
 
         activate_preview(&env.conn, &soul_id, &ids, "device_t").unwrap();
 
@@ -2347,7 +2430,15 @@ mod tests {
         .unwrap();
 
         let new_data = r#"{"claim":"Prefer extremely verbose prose","evidence":"Q — Long","source":"calibration","questionId":"pref_1","value":"Long","confidence":0.9}"#;
-        update_entity(&env.conn, &ent.id, "candidate", Some(new_data), "device_t").unwrap();
+        update_entity(
+            &env.conn,
+            &soul.soul_id,
+            &ent.id,
+            "candidate",
+            Some(new_data),
+            "device_t",
+        )
+        .unwrap();
 
         assert!(
             search_entities(&env.conn, &soul.soul_id, "verbose", 10)

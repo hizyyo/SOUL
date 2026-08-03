@@ -354,6 +354,7 @@ pub fn compile_and_respond(
     origin: &str,
     query: &ContextQuery,
 ) -> Result<Value, String> {
+    context::validate_query(query)?;
     let conn = open_app_db(app_dir)?;
     let entities: Vec<context::ContextEntity> = {
         let souls = db::list_souls(&conn).map_err(|e| format!("Cannot read SOUL database: {e}"))?;

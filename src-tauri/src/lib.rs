@@ -155,13 +155,21 @@ fn add_entity_cmd(
 #[tauri::command]
 fn update_entity_cmd(
     state: tauri::State<AppState>,
+    soul_id: String,
     entity_id: String,
     status: String,
     data: Option<String>,
     device_id: String,
 ) -> Result<EntityInfo, String> {
     let conn = state.conn.lock().map_err(|e| e.to_string())?;
-    let row = update_entity(&conn, &entity_id, &status, data.as_deref(), &device_id)?;
+    let row = update_entity(
+        &conn,
+        &soul_id,
+        &entity_id,
+        &status,
+        data.as_deref(),
+        &device_id,
+    )?;
     Ok(entity_to_info(&row))
 }
 
@@ -449,10 +457,11 @@ fn list_evaluations_cmd(
 #[tauri::command]
 fn delete_evaluation_cmd(
     state: tauri::State<AppState>,
+    soul_id: String,
     evaluation_id: String,
 ) -> Result<(), String> {
     let conn = state.conn.lock().map_err(|e| e.to_string())?;
-    eval::delete_evaluation(&conn, &evaluation_id)
+    eval::delete_evaluation(&conn, &soul_id, &evaluation_id)
 }
 
 #[tauri::command]

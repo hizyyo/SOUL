@@ -387,7 +387,7 @@ impl SoulRule {
 }
 
 /// Результат оценки действия политиками.
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, PartialEq, Serialize)]
 pub struct Decision {
     pub effect: Effect,
     pub rule_id: Option<String>,
@@ -686,6 +686,117 @@ mod tests {
             confirmed_by_user: false,
             requested_scopes: vec!["purchase:write".to_string()],
             payload_hash: "h1".to_string(),
+        }
+    }
+
+    // ---------- Property-тесты ----------
+
+    #[test]
+    fn property_evaluate_is_total_deterministic_and_never_panics() {
+        use rand::rngs::StdRng;
+        use rand::{Rng, SeedableRng};
+        let mut rng = StdRng::seed_from_u64(0x5a01_13a5);
+        let env = TestEnv::new();
+        let conn = &env.conn;
+
+        let kinds = [
+            "notes.create",
+            "purchase.create",
+            "data.delete",
+            "slack.post",
+            "email.send",
+            "account.delete",
+            "calendar.read",
+        ];
+        let actors = ["agent-1", "agent-2", "user-1"];
+        let connectors = ["conn_stripe", "conn_slack", "conn_ftp"];
+        let accounts = ["acct_1", "acct_2", "acct_3"];
+        let environments = ["production", "staging", "development"];
+        let domains = [
+            None,
+            Some("shopping"),
+            Some("finance"),
+            Some("health"),
+            Some("news"),
+        ];
+        let currencies = ["USD", "EUR", "RUB"];
+        let effects = ["allow", "deny", "require_confirmation", "redact"];
+
+        let atom_pool: Vec<&str> = vec![
+            r#"{"eq":["action.kind","notes.create"]}"#,
+            r#"{"neq":["action.kind","data.delete"]}"#,
+            r#"{"in":["action.domain",["shopping","finance"]]}"#,
+            r#"{"gt":["action.amount",500]}"#,
+            r#"{"lte":["action.amount",1000]}"#,
+            r#"{"eq":["action.connector_id","conn_stripe"]}"#,
+            r#"{"eq":["action.reversible",true]}"#,
+            r#"{"eq":["action.confirmed_by_user",false]}"#,
+            r#"{"in":["action.environment",["production","staging"]]}"#,
+            r#"{"in":["action.data_classes",["medical","financial"]]}"#,
+        ];
+
+        // Случайный, но валидный набор правил (детерминированный по сиду).
+        let mut rule_count = 0usize;
+        for _ in 0..24 {
+            let effect = effects[rng.gen_range(0..effects.len())];
+            let priority = rng.gen_range(0..=10_000);
+            let when = rng.gen_range(0..4);
+            let json = match when {
+                0 => format!(
+                    r#"{{"id":"prop_{rule_count}","priority":{priority},"when":{{"eq":["action.kind","{}"]}},"effect":"{effect}","message":"prop"}}"#,
+                    kinds[rng.gen_range(0..kinds.len())]
+                ),
+                1 => format!(
+                    r#"{{"id":"prop_{rule_count}","priority":{priority},"when":{{"any":[{}]}},"effect":"{effect}","message":"prop"}}"#,
+                    atom_pool[rng.gen_range(0..atom_pool.len())]
+                ),
+                2 => format!(
+                    r#"{{"id":"prop_{rule_count}","priority":{priority},"when":{{"not":{}}},"effect":"{effect}","message":"prop"}}"#,
+                    atom_pool[rng.gen_range(0..atom_pool.len())]
+                ),
+                _ => format!(
+                    r#"{{"id":"prop_{rule_count}","priority":{priority},"when":{{"all":[{}]}},"effect":"{effect}","message":"prop"}}"#,
+                    atom_pool[rng.gen_range(0..atom_pool.len())]
+                ),
+            };
+            if create_policy(conn, &json).is_ok() {
+                rule_count += 1;
+            }
+        }
+        assert!(rule_count >= 20, "seeded rules must be valid: {rule_count}");
+
+        for i in 0..400 {
+            let mut a = purchase(None);
+            a.action_id = format!("act_prop_{i}");
+            a.kind = kinds[rng.gen_range(0..kinds.len())].to_string();
+            a.actor = actors[rng.gen_range(0..actors.len())].to_string();
+            a.connector_id = connectors[rng.gen_range(0..connectors.len())].to_string();
+            a.account_id = accounts[rng.gen_range(0..accounts.len())].to_string();
+            a.environment = environments[rng.gen_range(0..environments.len())].to_string();
+            a.domain = domains[rng.gen_range(0..domains.len())].map(|d| d.to_string());
+            a.amount = Some(rng.gen_range(0.0..1e12));
+            a.currency = Some(currencies[rng.gen_range(0..currencies.len())].to_string());
+            a.recipient = if rng.gen_bool(0.3) {
+                Some("external@corp.com".to_string())
+            } else {
+                None
+            };
+            a.data_classes = if rng.gen_bool(0.4) {
+                vec!["medical".to_string()]
+            } else {
+                vec![]
+            };
+
+            let first = evaluate(conn, &a).unwrap();
+            assert!(
+                matches!(
+                    first.effect,
+                    Effect::Allow | Effect::Deny | Effect::RequireConfirmation | Effect::Redact
+                ),
+                "evaluation must always yield a defined effect"
+            );
+            let second = evaluate(conn, &a).unwrap();
+            assert_eq!(first, second, "evaluate must be deterministic");
         }
     }
 
