@@ -275,6 +275,11 @@ const BASE_SCHEMA_SQL: &str = "
             FOREIGN KEY (soul_id) REFERENCES souls(soul_id)
         );
 
+        CREATE TABLE IF NOT EXISTS meta (
+            key TEXT PRIMARY KEY,
+            value TEXT NOT NULL
+        );
+
         CREATE INDEX IF NOT EXISTS idx_events_soul ON events(soul_id);
         CREATE INDEX IF NOT EXISTS idx_entities_soul ON entities(soul_id);
         CREATE INDEX IF NOT EXISTS idx_entities_type ON entities(entity_type);";
@@ -386,15 +391,17 @@ pub fn fts_match_query(text: &str) -> Option<String> {
 
 /// Полнотекстовый поиск сущностей по claim/evidence (FTS5 + bm25).
 /// Результаты ограничены душой (soul_id) — чужие сущности не утекают.
+/// Возвращает на одну строку больше лимита, чтобы вызвающий мог показать
+/// `truncated: true` (SESSION-14) — строго больше совпадений, чем показано.
 pub fn search_entities(
     conn: &Connection,
     soul_id: &str,
     query: &str,
     limit: usize,
-) -> SqlResult<Vec<EntityRow>> {
+) -> SqlResult<(Vec<EntityRow>, bool)> {
     let limit = limit.clamp(1, 100);
     let Some(match_expr) = fts_match_query(query) else {
-        return Ok(Vec::new());
+        return Ok((Vec::new(), false));
     };
     let mut stmt = conn.prepare(
         "SELECT e.id, e.soul_id, e.entity_type, e.status, e.data, e.created_at, e.updated_at
@@ -404,7 +411,7 @@ pub fn search_entities(
          ORDER BY bm25(entity_fts) ASC, e.updated_at DESC
          LIMIT ?3",
     )?;
-    let rows = stmt.query_map(params![match_expr, soul_id, limit as i64], |row| {
+    let rows = stmt.query_map(params![match_expr, soul_id, limit as i64 + 1], |row| {
         Ok(EntityRow {
             id: row.get(0)?,
             soul_id: row.get(1)?,
@@ -419,7 +426,11 @@ pub fn search_entities(
     for row in rows {
         result.push(row?);
     }
-    Ok(result)
+    let truncated = result.len() > limit;
+    if truncated {
+        result.truncate(limit);
+    }
+    Ok((result, truncated))
 }
 
 /// Аддитивная миграция: добавляет колонку, только если её ещё нет.
@@ -493,6 +504,8 @@ pub fn wipe_all(conn: &Connection) -> SqlResult<()> {
     conn.execute_batch(WIPE_SQL)?;
     conn.execute_batch("PRAGMA wal_checkpoint(TRUNCATE);")?;
     conn.execute_batch("VACUUM;")?;
+    bump_revision(conn, META_STATE_REVISION)?;
+    bump_revision(conn, META_POLICY_REVISION)?;
     Ok(())
 }
 
@@ -501,7 +514,70 @@ pub fn wipe_all(conn: &Connection) -> SqlResult<()> {
 /// транзакции не терял существующие данные.
 pub fn wipe_all_tx(tx: &Transaction<'_>) -> SqlResult<()> {
     tx.execute_batch(WIPE_SQL)?;
+    bump_revision(tx, META_STATE_REVISION)?;
+    bump_revision(tx, META_POLICY_REVISION)?;
     Ok(())
+}
+
+/// Ключи таблицы `meta` (SESSION-14): монотонные ревизии состояния и политик
+/// для кеша контекста по версии + метаданные последнего импорта для
+/// идемпотентного быстрого пути (повторный импорт того же пакета не
+/// пересобирает данные). Ревизии никогда не сбрасываются (wipe их увеличивает),
+/// поэтому ключ кеша не может случайно совпасть после цикла wipe+импорт.
+pub const META_STATE_REVISION: &str = "state_revision";
+pub const META_POLICY_REVISION: &str = "policy_revision";
+pub const META_IMPORTED_CONTENT_HASH: &str = "imported_content_hash";
+pub const META_IMPORTED_SOUL_ID: &str = "imported_soul_id";
+pub const META_IMPORTED_STATE_REVISION: &str = "imported_state_revision";
+
+pub fn get_meta(conn: &Connection, key: &str) -> SqlResult<Option<String>> {
+    let mut stmt = conn.prepare("SELECT value FROM meta WHERE key = ?1")?;
+    let mut rows = stmt.query_map(params![key], |row| row.get::<_, String>(0))?;
+    match rows.next() {
+        Some(row) => Ok(Some(row?)),
+        None => Ok(None),
+    }
+}
+
+pub fn set_meta(conn: &Connection, key: &str, value: &str) -> SqlResult<()> {
+    conn.execute(
+        "INSERT INTO meta (key, value) VALUES (?1, ?2)
+         ON CONFLICT(key) DO UPDATE SET value = excluded.value",
+        params![key, value],
+    )?;
+    Ok(())
+}
+
+/// Монотонный счётчик: читает, увеличивает, записывает. Внутри транзакции
+/// (add_entity/update_entity/activate_preview/импорт) — атомарно с мутацией.
+fn bump_revision(conn: &Connection, key: &str) -> SqlResult<i64> {
+    let current: i64 = get_meta(conn, key)?
+        .and_then(|v| v.parse().ok())
+        .unwrap_or(0);
+    let next = current + 1;
+    set_meta(conn, key, &next.to_string())?;
+    Ok(next)
+}
+
+pub fn bump_state_revision(conn: &Connection) -> SqlResult<i64> {
+    bump_revision(conn, META_STATE_REVISION)
+}
+
+pub fn bump_policy_revision(conn: &Connection) -> SqlResult<i64> {
+    bump_revision(conn, META_POLICY_REVISION)
+}
+
+/// Текущие ревизии для ключа кеша контекста. Свежая БД (без записей) — 0.
+pub fn state_revision(conn: &Connection) -> SqlResult<i64> {
+    Ok(get_meta(conn, META_STATE_REVISION)?
+        .and_then(|v| v.parse().ok())
+        .unwrap_or(0))
+}
+
+pub fn policy_revision(conn: &Connection) -> SqlResult<i64> {
+    Ok(get_meta(conn, META_POLICY_REVISION)?
+        .and_then(|v| v.parse().ok())
+        .unwrap_or(0))
 }
 
 pub fn get_calibration(conn: &Connection, soul_id: &str) -> SqlResult<(i32, String)> {
@@ -747,6 +823,8 @@ pub fn activate_preview(
         },
     )
     .map_err(|e| e.to_string())?;
+
+    bump_state_revision(&tx).map_err(|e| e.to_string())?;
 
     tx.commit().map_err(|e| e.to_string())?;
     Ok(())
@@ -994,6 +1072,8 @@ pub fn update_entity(
     )
     .map_err(|e| e.to_string())?;
 
+    bump_state_revision(&tx).map_err(|e| e.to_string())?;
+
     tx.commit().map_err(|e| e.to_string())?;
 
     get_entity(conn, entity_id)
@@ -1157,6 +1237,8 @@ pub fn add_entity(
         params![head, soul_id],
     )
     .map_err(|e| e.to_string())?;
+
+    bump_state_revision(&tx).map_err(|e| e.to_string())?;
 
     tx.commit().map_err(|e| e.to_string())?;
 
@@ -2349,12 +2431,14 @@ mod tests {
         let soul = create_soul(&env.conn, "Тест", "device_t").unwrap();
         seed_fts_entities(&env, &soul.soul_id, "candidate");
 
-        let hits = search_entities(&env.conn, &soul.soul_id, "concise", 10).unwrap();
+        let (hits, truncated) = search_entities(&env.conn, &soul.soul_id, "concise", 10).unwrap();
         assert_eq!(hits.len(), 1);
+        assert!(!truncated);
         assert!(hits[0].data.contains("Concise"));
 
-        let hits = search_entities(&env.conn, &soul.soul_id, "bullet", 10).unwrap();
+        let (hits, truncated) = search_entities(&env.conn, &soul.soul_id, "bullet", 10).unwrap();
         assert_eq!(hits.len(), 1);
+        assert!(!truncated);
         assert!(hits[0].data.contains("Bullet points"));
     }
 
@@ -2385,7 +2469,7 @@ mod tests {
         )
         .unwrap();
 
-        let hits = search_entities(&env.conn, &soul.soul_id, "concise", 10).unwrap();
+        let (hits, _truncated) = search_entities(&env.conn, &soul.soul_id, "concise", 10).unwrap();
         assert_eq!(hits.len(), 2);
         assert!(
             hits[0].data.contains("Prefer concise concise"),
@@ -2393,7 +2477,8 @@ mod tests {
         );
 
         // AND-семантика: слово из одного клайма не должно тянуть чужой результат.
-        let hits = search_entities(&env.conn, &soul.soul_id, "concise technical", 10).unwrap();
+        let (hits, _truncated) =
+            search_entities(&env.conn, &soul.soul_id, "concise technical", 10).unwrap();
         assert_eq!(hits.len(), 1);
         assert!(hits[0].data.contains("Prefer concise concise"));
     }
@@ -2408,7 +2493,7 @@ mod tests {
 
         // "prefer" есть в двух сущностях каждой души: проверяем, что результат
         // для soul_a не содержит ни одной чужой сущности.
-        let hits = search_entities(&env.conn, &soul_a.soul_id, "prefer", 10).unwrap();
+        let (hits, _truncated) = search_entities(&env.conn, &soul_a.soul_id, "prefer", 10).unwrap();
         assert_eq!(hits.len(), 2);
         for hit in &hits {
             assert_eq!(hit.soul_id, soul_a.soul_id, "foreign entity leaked");
@@ -2443,11 +2528,13 @@ mod tests {
         assert!(
             search_entities(&env.conn, &soul.soul_id, "verbose", 10)
                 .unwrap()
+                .0
                 .len()
                 == 1
         );
         assert!(search_entities(&env.conn, &soul.soul_id, "concise", 10)
             .unwrap()
+            .0
             .is_empty());
 
         env.conn
@@ -2455,6 +2542,7 @@ mod tests {
             .unwrap();
         assert!(search_entities(&env.conn, &soul.soul_id, "verbose", 10)
             .unwrap()
+            .0
             .is_empty());
     }
 
@@ -2470,7 +2558,7 @@ mod tests {
             )
             .unwrap();
 
-        let hits = search_entities(&env.conn, &soul.soul_id, "signal", 10).unwrap();
+        let (hits, _truncated) = search_entities(&env.conn, &soul.soul_id, "signal", 10).unwrap();
         assert_eq!(hits.len(), 1);
         assert_eq!(hits[0].id, "ent_imp");
     }
@@ -2482,7 +2570,8 @@ mod tests {
         seed_fts_entities(&env, &soul.soul_id, "candidate");
 
         for garbage in ["", "   ", "!!!", "\"\"", "()", "AND", "-", "***", "? query"] {
-            let hits = search_entities(&env.conn, &soul.soul_id, garbage, 10).unwrap();
+            let (hits, _truncated) =
+                search_entities(&env.conn, &soul.soul_id, garbage, 10).unwrap();
             assert_eq!(
                 hits.len(),
                 0,
@@ -2496,9 +2585,23 @@ mod tests {
         let env = TestEnv::new();
         let soul = create_soul(&env.conn, "Тест", "device_t").unwrap();
         seed_fts_entities(&env, &soul.soul_id, "candidate");
+        // Ещё совпадения по "prefer", чтобы результат гарантированно
+        // превышал лимит и был помечен как truncated.
+        for i in 0..4 {
+            add_entity(
+                &env.conn,
+                &soul.soul_id,
+                "preference",
+                "candidate",
+                &fts_data(&format!("extra_{i}"), "X", "Prefer extra note"),
+                "device_t",
+            )
+            .unwrap();
+        }
 
-        let hits = search_entities(&env.conn, &soul.soul_id, "prefer", 2).unwrap();
+        let (hits, truncated) = search_entities(&env.conn, &soul.soul_id, "prefer", 2).unwrap();
         assert_eq!(hits.len(), 2);
+        assert!(truncated, "more than 2 matches must report truncation");
     }
 
     #[test]
@@ -2522,7 +2625,8 @@ mod tests {
 
         let start = std::time::Instant::now();
         for _ in 0..20 {
-            let hits = search_entities(&env.conn, &soul.soul_id, "topic_7", 10).unwrap();
+            let (hits, _truncated) =
+                search_entities(&env.conn, &soul.soul_id, "topic_7", 10).unwrap();
             assert!(!hits.is_empty());
         }
         let elapsed = start.elapsed();

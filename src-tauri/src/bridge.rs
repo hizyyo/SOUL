@@ -11,7 +11,6 @@
 //! расширенное хранилище.
 
 use crate::context::{self, ContextQuery};
-use crate::db;
 use crate::package::{self, DisclosureReceipt};
 use rusqlite::{Connection, OpenFlags};
 use serde_json::{json, Value};
@@ -356,27 +355,7 @@ pub fn compile_and_respond(
 ) -> Result<Value, String> {
     context::validate_query(query)?;
     let conn = open_app_db(app_dir)?;
-    let entities: Vec<context::ContextEntity> = {
-        let souls = db::list_souls(&conn).map_err(|e| format!("Cannot read SOUL database: {e}"))?;
-        match souls.first() {
-            Some(soul) => db::list_entities(&conn, &soul.soul_id)
-                .map_err(|e| format!("Cannot read SOUL database: {e}"))?
-                .into_iter()
-                .map(|r| context::ContextEntity {
-                    id: r.id,
-                    soul_id: r.soul_id,
-                    entity_type: r.entity_type,
-                    status: r.status,
-                    data: r.data,
-                    created_at: r.created_at,
-                    updated_at: r.updated_at,
-                })
-                .collect(),
-            None => Vec::new(),
-        }
-    };
-
-    let pack = context::compile_context(&entities, query);
+    let pack = context::compile_context_cached(&conn, query)?;
 
     let receipt = DisclosureReceipt {
         kind: "disclosure".to_string(),
@@ -387,6 +366,7 @@ pub fn compile_and_respond(
         policy_version: pack.policy_version.clone(),
         state_version: pack.state_version.clone(),
         max_tokens: pack.max_tokens as i64,
+        cost_estimate_usd: context::cost_estimate_usd(pack.token_estimate),
     };
     package::write_disclosure_receipt(app_dir, &receipt)
         .map_err(|e| format!("Cannot write disclosure receipt: {e}"))?;
@@ -397,6 +377,7 @@ pub fn compile_and_respond(
         "pack": pack.serialized,
         "entityCount": pack.items.len(),
         "tokenEstimate": pack.token_estimate,
+        "costEstimateUsd": context::cost_estimate_usd(pack.token_estimate),
         "policyVersion": pack.policy_version,
         "stateVersion": pack.state_version,
         "maxTokens": pack.max_tokens,

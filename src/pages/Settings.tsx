@@ -85,6 +85,14 @@ interface ReceiptSummary {
   token_estimate: number | null;
   policy_version: string | null;
   state_version: string | null;
+  cost_estimate_usd: number | null;
+}
+
+interface ContextUsageStats {
+  disclosure_calls: number;
+  input_tokens_total: number;
+  cost_estimate_usd_total: number;
+  last_disclosed_at: string | null;
 }
 
 type ModalState =
@@ -131,12 +139,14 @@ export function Settings({ soul, entities, onDataChanged, onGoHome }: SettingsPr
   const [error, setError] = useState<string | null>(null);
   const [success, setSuccess] = useState<string | null>(null);
   const [receipts, setReceipts] = useState<ReceiptSummary[]>([]);
+  const [usage, setUsage] = useState<ContextUsageStats | null>(null);
   const [clients, setClients] = useState<ClientStatus[]>([]);
   const [bridge, setBridge] = useState<BridgeStatus | null>(null);
 
   const loadReceipts = async () => {
     try {
       setReceipts(await invoke<ReceiptSummary[]>('list_receipts_cmd'));
+      setUsage(await invoke<ContextUsageStats>('context_usage_cmd'));
     } catch {
       setReceipts([]);
     }
@@ -603,6 +613,24 @@ export function Settings({ soul, entities, onDataChanged, onGoHome }: SettingsPr
           Deletion and disclosure receipts stored on this device. Receipts contain no personal
           content — only what happened, when and how much.
         </p>
+        {usage && usage.disclosure_calls > 0 && (
+          <div
+            style={{
+              fontSize: '12px',
+              color: '#4b5563',
+              padding: '8px 10px',
+              border: '1px solid #e5e7eb',
+              borderRadius: '6px',
+              marginBottom: '8px',
+            }}
+          >
+            Context disclosures: {usage.disclosure_calls} · {usage.input_tokens_total} input tokens
+            total · ~${usage.cost_estimate_usd_total.toFixed(4)} est. cost
+            {usage.last_disclosed_at
+              ? ` · last ${new Date(usage.last_disclosed_at).toLocaleString()}`
+              : ''}
+          </div>
+        )}
         {receipts.length === 0 ? (
           <p style={{ fontSize: '13px', color: '#9ca3af', margin: 0 }}>No receipts yet.</p>
         ) : (
@@ -636,6 +664,7 @@ export function Settings({ soul, entities, onDataChanged, onGoHome }: SettingsPr
                       {r.entity_count} entities)
                     </span>
                     <span>~{r.token_estimate ?? 0} tokens</span>
+                    <span>~${(r.cost_estimate_usd ?? 0).toFixed(4)} est.</span>
                     <span>state {r.state_version ?? '—'}</span>
                     <span>policy {r.policy_version ?? '—'}</span>
                   </>

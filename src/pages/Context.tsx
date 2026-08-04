@@ -3,6 +3,7 @@ import {
   compileContext,
   defaultQuery,
   collectDomains,
+  costEstimateUsd,
   CONTEXT_STANDARD_TOKENS,
   CONTEXT_HARD_MAX_TOKENS,
   type ContextQuery,
@@ -32,6 +33,11 @@ interface EntityInfo {
   data: string;
   created_at: string;
   updated_at: string;
+}
+
+interface SearchResponse {
+  items: EntityInfo[];
+  truncated: boolean;
 }
 
 declare global {
@@ -106,6 +112,7 @@ function Chip({
 export function ContextPage({ soul, entities }: { soul: SoulInfo | null; entities: EntityInfo[] }) {
   const [search, setSearch] = useState('');
   const [hits, setHits] = useState<EntityInfo[]>([]);
+  const [hitsTruncated, setHitsTruncated] = useState(false);
   const [searching, setSearching] = useState(false);
   const [domains, setDomains] = useState<string[]>([]);
   const [sensitivity, setSensitivity] = useState<SensitivityLevel[]>([]);
@@ -122,21 +129,28 @@ export function ContextPage({ soul, entities }: { soul: SoulInfo | null; entitie
     const seq = ++requestSeqRef.current;
     if (!soul || !text) {
       setHits([]);
+      setHitsTruncated(false);
       setSearching(false);
       return;
     }
     setSearching(true);
     timerRef.current = window.setTimeout(() => {
-      invoke<EntityInfo[]>('search_entities_cmd', {
+      invoke<SearchResponse>('search_entities_cmd', {
         soulId: soul.soul_id,
         query: text,
         limit: 20,
       })
         .then((res) => {
-          if (requestSeqRef.current === seq) setHits(res);
+          if (requestSeqRef.current === seq) {
+            setHits(res.items);
+            setHitsTruncated(res.truncated);
+          }
         })
         .catch(() => {
-          if (requestSeqRef.current === seq) setHits([]);
+          if (requestSeqRef.current === seq) {
+            setHits([]);
+            setHitsTruncated(false);
+          }
         })
         .finally(() => {
           if (requestSeqRef.current === seq) setSearching(false);
@@ -232,6 +246,11 @@ export function ContextPage({ soul, entities }: { soul: SoulInfo | null; entitie
               {parseClaim(hit.data)}
             </div>
           ))}
+          {hitsTruncated && (
+            <div style={{ fontSize: '11px', color: '#9ca3af', marginTop: '4px' }}>
+              results truncated at 20 — refine the query
+            </div>
+          )}
         </div>
       )}
 
@@ -317,7 +336,8 @@ export function ContextPage({ soul, entities }: { soul: SoulInfo | null; entitie
               color: pack.tokenEstimate > pack.maxTokens ? '#dc2626' : '#16a34a',
             }}
           >
-            {pack.tokenEstimate} / {pack.maxTokens} tokens · {pack.items.length} entities
+            {pack.tokenEstimate} / {pack.maxTokens} tokens · {pack.items.length} entities · ~ $
+            {costEstimateUsd(pack.tokenEstimate).toFixed(4)}
           </span>
         </div>
         <pre

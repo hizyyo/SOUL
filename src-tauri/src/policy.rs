@@ -18,6 +18,8 @@ use rusqlite::{params, Connection, Result as SqlResult};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
+use crate::db;
+
 /// Максимальный размер сериализованного правила (символов).
 pub const MAX_RULE_JSON_CHARS: usize = 4_096;
 /// Верхняя граница приоритета правила.
@@ -532,6 +534,7 @@ pub fn create_policy(conn: &Connection, rule_json: &str) -> Result<PolicyRow, St
         params![&rule.id, rule.priority, rule_json, now],
     )
     .map_err(|e| format!("policy insert failed: {e}"))?;
+    db::bump_policy_revision(conn).map_err(|e| format!("policy revision failed: {e}"))?;
     get_policy(conn, &rule.id).map_err(|e| format!("reload failed: {e}"))
 }
 
@@ -573,6 +576,7 @@ pub fn set_policy_enabled(
     if n == 0 {
         return Err("Policy not found.".to_string());
     }
+    db::bump_policy_revision(conn).map_err(|e| format!("policy revision failed: {e}"))?;
     get_policy(conn, policy_id)
 }
 
@@ -583,6 +587,7 @@ pub fn delete_policy(conn: &Connection, policy_id: &str) -> Result<(), String> {
     if n == 0 {
         return Err("Policy not found.".to_string());
     }
+    db::bump_policy_revision(conn).map_err(|e| format!("policy revision failed: {e}"))?;
     Ok(())
 }
 

@@ -60,6 +60,14 @@ pub struct CalibrationState {
     answers: String,
 }
 
+/// Результат полнотекстового поиска: найденные сущности и признак, что
+/// результат обрезан лимитом (SESSION-14 — UI показывает «и ещё N»).
+#[derive(Debug, Serialize, Deserialize)]
+pub struct SearchResult {
+    items: Vec<EntityInfo>,
+    truncated: bool,
+}
+
 fn soul_to_info(conn: &rusqlite::Connection, s: &db::SoulManifest) -> SoulInfo {
     let activated = is_soul_activated(conn, &s.soul_id).unwrap_or(false);
     let (cstep, _, _, preview_confirmed) =
@@ -189,10 +197,14 @@ fn search_entities_cmd(
     soul_id: String,
     query: String,
     limit: usize,
-) -> Result<Vec<EntityInfo>, String> {
+) -> Result<SearchResult, String> {
     let conn = state.conn.lock().map_err(|e| e.to_string())?;
-    let rows = db::search_entities(&conn, &soul_id, &query, limit).map_err(|e| e.to_string())?;
-    Ok(rows.iter().map(entity_to_info).collect())
+    let (rows, truncated) =
+        db::search_entities(&conn, &soul_id, &query, limit).map_err(|e| e.to_string())?;
+    Ok(SearchResult {
+        items: rows.iter().map(entity_to_info).collect(),
+        truncated,
+    })
 }
 
 #[tauri::command]
@@ -337,6 +349,12 @@ fn export_soul_markdown_cmd(
 fn list_receipts_cmd(app: tauri::AppHandle) -> Result<Vec<ReceiptSummary>, String> {
     let app_dir = app.path().app_data_dir().map_err(|e| e.to_string())?;
     package::list_local_receipts(&app_dir)
+}
+
+#[tauri::command]
+fn context_usage_cmd(app: tauri::AppHandle) -> Result<package::ContextUsageStats, String> {
+    let app_dir = app.path().app_data_dir().map_err(|e| e.to_string())?;
+    package::context_usage_stats(&app_dir)
 }
 
 #[tauri::command]
@@ -636,6 +654,7 @@ pub fn run() {
             export_soul_markdown_cmd,
             delete_soul_cmd,
             list_receipts_cmd,
+            context_usage_cmd,
             detect_clients_cmd,
             connect_client_cmd,
             disconnect_client_cmd,

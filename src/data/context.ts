@@ -112,6 +112,13 @@ export interface ContextPack {
   serialized: string;
 }
 
+/** Оценочная стоимость входных токенов, USD (SESSION-14). */
+export const COST_USD_PER_1K_INPUT_TOKENS = 0.005;
+
+export function costEstimateUsd(tokenEstimate: number): number {
+  return (tokenEstimate / 1000) * COST_USD_PER_1K_INPUT_TOKENS;
+}
+
 function isCjk(code: number): boolean {
   return (
     (code >= 0x4e00 && code <= 0x9fff) || // CJK Unified

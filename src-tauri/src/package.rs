@@ -137,6 +137,10 @@ pub struct DisclosureReceipt {
     pub policy_version: String,
     pub state_version: String,
     pub max_tokens: i64,
+    /// Оценочная стоимость входных токенов контекста, USD (SESSION-14).
+    /// Оценка по константе цены; для старых квитанций без поля — 0.0.
+    #[serde(default)]
+    pub cost_estimate_usd: f64,
 }
 
 #[derive(Debug, Serialize)]
@@ -153,6 +157,20 @@ pub struct ReceiptSummary {
     pub token_estimate: Option<i64>,
     pub policy_version: Option<String>,
     pub state_version: Option<String>,
+    /// Оценочная стоимость входных токенов (только для disclosure), USD.
+    #[serde(default)]
+    pub cost_estimate_usd: Option<f64>,
+}
+
+/// Агрегированная статистика раскрытий контекста (SESSION-14): сколько раз
+/// контекст был выдан, сколько входных токенов и их оценочная стоимость.
+/// Без текста задач и любых личных данных.
+#[derive(Debug, Clone, Serialize)]
+pub struct ContextUsageStats {
+    pub disclosure_calls: i64,
+    pub input_tokens_total: i64,
+    pub cost_estimate_usd_total: f64,
+    pub last_disclosed_at: Option<String>,
 }
 
 /// Атомарная запись квитанции раскрытия в каталог receipts.
@@ -199,6 +217,7 @@ pub fn list_local_receipts(app_dir: &Path) -> Result<Vec<ReceiptSummary>, String
                     token_estimate: Some(r.token_estimate),
                     policy_version: Some(r.policy_version),
                     state_version: Some(r.state_version),
+                    cost_estimate_usd: Some(r.cost_estimate_usd),
                 });
                 continue;
             }
@@ -214,12 +233,48 @@ pub fn list_local_receipts(app_dir: &Path) -> Result<Vec<ReceiptSummary>, String
                     token_estimate: None,
                     policy_version: None,
                     state_version: None,
+                    cost_estimate_usd: None,
                 });
             }
         }
     }
     receipts.sort_by(|a, b| b.at.cmp(&a.at));
     Ok(receipts)
+}
+
+/// Агрегированная статистика раскрытий контекста (SESSION-14) из каталога
+/// receipts: число вызовов, суммарные входные токены, оценочная стоимость,
+/// время последнего раскрытия. Только disclosure-квитанции; deletion- и
+/// повреждённые файлы игнорируются.
+pub fn context_usage_stats(app_dir: &Path) -> Result<ContextUsageStats, String> {
+    let receipts = list_local_receipts(app_dir)?;
+    let mut stats = ContextUsageStats {
+        disclosure_calls: 0,
+        input_tokens_total: 0,
+        cost_estimate_usd_total: 0.0,
+        last_disclosed_at: None,
+    };
+    for r in receipts {
+        if r.kind != "disclosure" {
+            continue;
+        }
+        stats.disclosure_calls += 1;
+        if let Some(t) = r.token_estimate {
+            stats.input_tokens_total += t;
+        }
+        if let Some(c) = r.cost_estimate_usd {
+            stats.cost_estimate_usd_total += c;
+        }
+        if stats
+            .last_disclosed_at
+            .as_deref()
+            .map(|t| t < r.at.as_str())
+            .unwrap_or(true)
+        {
+            stats.last_disclosed_at = Some(r.at);
+        }
+    }
+    Ok(stats)
 }
 
 fn file_name_of(path: &Path) -> String {
@@ -231,6 +286,8 @@ fn file_name_of(path: &Path) -> String {
 #[derive(Debug)]
 pub struct VerifiedPackage {
     pub payload: SoulExportPayload,
+    /// SHA-256 расшифрованного payload (из envelope, проверенный).
+    pub content_hash: String,
 }
 
 pub fn build_export_payload(
@@ -561,7 +618,10 @@ pub fn verify_package_bytes(
     verify_event_chain(&payload)?;
     verify_entities(&payload)?;
 
-    Ok(VerifiedPackage { payload })
+    Ok(VerifiedPackage {
+        payload,
+        content_hash: envelope.content_hash,
+    })
 }
 
 pub fn inspect_package_file(path: &Path, password: &str) -> Result<ImportPreview, String> {
@@ -599,7 +659,35 @@ pub fn import_package_file(
 ) -> Result<db::SoulManifest, String> {
     let bytes = crypto::read_file_limited(path, MAX_PACKAGE_BYTES)?;
     let vp = verify_package_bytes(&bytes, password, MAX_PACKAGE_BYTES)?;
+    let content_hash = vp.content_hash.clone();
     let payload = vp.payload;
+
+    // Кеш извлечения по hash содержимого (SESSION-14): если этот пакет уже был
+    // импортирован и с тех пор состояние не менялось — повторный импорт не
+    // пересобирает данные (нет wipe, нет FTS-переиндексации, нет новых
+    // квитанций). Пакет по-прежнему полностью проверен выше (подпись,
+    // формат, KDF, цепочка, сущности) — быстрый путь никогда не пропускает
+    // верификацию, только повторное применение.
+    let already_current = {
+        let current_rev = db::state_revision(conn).map_err(|e| e.to_string())?;
+        db::get_meta(conn, db::META_IMPORTED_CONTENT_HASH)
+            .map_err(|e| e.to_string())?
+            .as_deref()
+            == Some(content_hash.as_str())
+            && db::get_meta(conn, db::META_IMPORTED_SOUL_ID)
+                .map_err(|e| e.to_string())?
+                .as_deref()
+                == Some(payload.soul.soul_id.as_str())
+            && db::get_meta(conn, db::META_IMPORTED_STATE_REVISION)
+                .map_err(|e| e.to_string())?
+                .and_then(|v| v.parse::<i64>().ok())
+                == Some(current_rev)
+    };
+    if already_current {
+        return db::get_soul(conn, &payload.soul.soul_id)
+            .map_err(|e| e.to_string())?
+            .ok_or("Restored SOUL could not be read back.".to_string());
+    }
 
     let tx = conn.transaction().map_err(|e| e.to_string())?;
     db::wipe_all_tx(&tx).map_err(|e| e.to_string())?;
@@ -673,6 +761,18 @@ pub fn import_package_file(
     )
     .map_err(|e| e.to_string())?;
 
+    tx.commit().map_err(|e| e.to_string())?;
+
+    // Метаданные быстрого пути — после успешного импорта, той же транзакцией
+    // (ревизия уже обновлена wipe_all_tx внутри неё). Сбой записи метаданных
+    // откатывает весь импорт: целостность дороже скорости.
+    let tx = conn.transaction().map_err(|e| e.to_string())?;
+    let revision = db::state_revision(&tx).map_err(|e| e.to_string())?;
+    db::set_meta(&tx, db::META_IMPORTED_CONTENT_HASH, &content_hash).map_err(|e| e.to_string())?;
+    db::set_meta(&tx, db::META_IMPORTED_SOUL_ID, &payload.soul.soul_id)
+        .map_err(|e| e.to_string())?;
+    db::set_meta(&tx, db::META_IMPORTED_STATE_REVISION, &revision.to_string())
+        .map_err(|e| e.to_string())?;
     tx.commit().map_err(|e| e.to_string())?;
 
     db::get_soul(conn, &payload.soul.soul_id)
@@ -807,8 +907,8 @@ mod tests {
     use super::*;
     use crate::crypto;
     use crate::db::{
-        activate_soul, add_entity, confirm_soul_preview, create_soul, get_calibration, init_db,
-        is_soul_activated, list_entities, list_events, list_souls, save_calibration,
+        self, activate_soul, add_entity, confirm_soul_preview, create_soul, get_calibration,
+        init_db, is_soul_activated, list_entities, list_events, list_souls, save_calibration,
     };
     use rusqlite::Connection;
     use std::path::PathBuf;
@@ -1619,6 +1719,101 @@ mod tests {
                         .len()
                 })
                 .unwrap()
+        );
+    }
+
+    #[test]
+    fn reimport_same_file_is_fast_path_without_rewrite() {
+        let mut env = TestEnv::new();
+        let soul_id = create_seeded_soul(&mut env);
+        let path = export_fast(&env, &soul_id);
+
+        let first = import_package_file(&mut env.conn, &path, PASSWORD).unwrap();
+        let rev_after_first = db::state_revision(&env.conn).unwrap();
+        assert!(rev_after_first > 0);
+        assert!(db::get_meta(&env.conn, db::META_IMPORTED_CONTENT_HASH)
+            .unwrap()
+            .is_some());
+
+        // Второй импорт того же файла: верификация выполнена, но данные не
+        // пересобираются — ревизия состояния не должна измениться (полный
+        // путь wipe_all_tx повышает её).
+        let second = import_package_file(&mut env.conn, &path, PASSWORD).unwrap();
+        assert_eq!(first.soul_id, second.soul_id);
+        assert_eq!(db::state_revision(&env.conn).unwrap(), rev_after_first);
+        assert_eq!(
+            db::list_entities(&env.conn, &soul_id).unwrap().len(),
+            2,
+            "fast path must not duplicate or drop entities"
+        );
+    }
+
+    #[test]
+    fn import_after_mutation_rewrites_data() {
+        let mut env = TestEnv::new();
+        let soul_id = create_seeded_soul(&mut env);
+        let path = export_fast(&env, &soul_id);
+        import_package_file(&mut env.conn, &path, PASSWORD).unwrap();
+
+        // Мутация после импорта делает быстрый путь неприменимым: повторный
+        // импорт того же файла обязан перезаписать состояние из пакета.
+        let soul = db::get_soul(&env.conn, &soul_id).unwrap().unwrap();
+        db::add_entity(
+            &env.conn,
+            &soul.soul_id,
+            "fact",
+            "active",
+            r#"{"claim":"Local note added after import"}"#,
+            "device_t1",
+        )
+        .unwrap();
+        let rev_before = db::state_revision(&env.conn).unwrap();
+        import_package_file(&mut env.conn, &path, PASSWORD).unwrap();
+        assert!(
+            db::state_revision(&env.conn).unwrap() > rev_before,
+            "full import must bump revision after mutation"
+        );
+        let entities = db::list_entities(&env.conn, &soul_id).unwrap();
+        assert_eq!(
+            entities.len(),
+            2,
+            "package content must win over local note"
+        );
+    }
+
+    #[test]
+    fn context_usage_aggregates_disclosure_receipts() {
+        let env = TestEnv::new();
+        let receipt = DisclosureReceipt {
+            kind: "disclosure".to_string(),
+            disclosed_at: "2026-08-01T00:00:00Z".to_string(),
+            client: "test".to_string(),
+            entity_count: 5,
+            token_estimate: 1200,
+            policy_version: "1.0".to_string(),
+            state_version: "aaaa".to_string(),
+            max_tokens: 3000,
+            cost_estimate_usd: 0.006,
+        };
+        write_disclosure_receipt(&env.dir, &receipt).unwrap();
+        write_disclosure_receipt(
+            &env.dir,
+            &DisclosureReceipt {
+                disclosed_at: "2026-08-02T00:00:00Z".to_string(),
+                token_estimate: 800,
+                cost_estimate_usd: 0.004,
+                ..receipt.clone()
+            },
+        )
+        .unwrap();
+
+        let stats = context_usage_stats(&env.dir).unwrap();
+        assert_eq!(stats.disclosure_calls, 2);
+        assert_eq!(stats.input_tokens_total, 2000);
+        assert!((stats.cost_estimate_usd_total - 0.01).abs() < 1e-9);
+        assert_eq!(
+            stats.last_disclosed_at.as_deref(),
+            Some("2026-08-02T00:00:00Z")
         );
     }
 }
