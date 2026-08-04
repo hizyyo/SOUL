@@ -258,10 +258,12 @@ fn parse_data(data: &str) -> serde_json::Value {
     serde_json::from_str(data).unwrap_or(serde_json::Value::Null)
 }
 
+#[cfg(test)]
 fn obj_of(data: &str) -> Option<serde_json::Map<String, serde_json::Value>> {
     parse_data(data).as_object().cloned()
 }
 
+#[cfg(test)]
 fn str_of(data: &str, key: &str) -> Option<String> {
     obj_of(data)
         .and_then(|o| o.get(key).cloned())
@@ -287,8 +289,12 @@ fn domain_for_question(question_id: &str) -> &'static str {
 /// Разобранная сущность (SESSION-14): один JSON-парсинг на сущность вместо
 /// десятка повторных в фильтрующем цикле. Поля извлекаются один раз и
 /// переиспользуются и в фильтрах, и при сборке пакета.
-struct ParsedEntity<'a> {
-    entity: &'a ContextEntity,
+struct ParsedEntity {
+    id: String,
+    entity_type: String,
+    status: String,
+    created_at: String,
+    updated_at: String,
     claim: String,
     evidence: String,
     sensitivity: String,
@@ -297,10 +303,12 @@ struct ParsedEntity<'a> {
     people: Vec<String>,
     channels: Vec<String>,
     confidence: f64,
+    question_id: Option<String>,
+    value_key: String,
 }
 
-impl<'a> ParsedEntity<'a> {
-    fn from(entity: &'a ContextEntity) -> ParsedEntity<'a> {
+impl ParsedEntity {
+    fn from(entity: &ContextEntity) -> ParsedEntity {
         let data = parse_data(&entity.data);
         let obj = data.as_object();
         let get_str = |key: &str| -> String {
@@ -328,11 +336,12 @@ impl<'a> ParsedEntity<'a> {
             "internal".to_string()
         };
         let domains_raw = scope_list("domains");
-        let question_id = get_str("questionId");
+        let raw_question_id = get_str("questionId");
+        let question_id = (!raw_question_id.is_empty()).then_some(raw_question_id);
         let domains = if !domains_raw.is_empty() {
             domains_raw
-        } else if !question_id.is_empty() {
-            vec![domain_for_question(&question_id).to_string()]
+        } else if let Some(question_id) = question_id.as_deref() {
+            vec![domain_for_question(question_id).to_string()]
         } else {
             Vec::new()
         };
@@ -347,8 +356,18 @@ impl<'a> ParsedEntity<'a> {
                 }
             })
             .unwrap_or(0.0);
+        let value_key = obj
+            .and_then(|o| o.get("value"))
+            .map(serde_json::to_string)
+            .transpose()
+            .unwrap_or_default()
+            .unwrap_or_else(|| "null".to_string());
         ParsedEntity {
-            entity,
+            id: entity.id.clone(),
+            entity_type: entity.entity_type.clone(),
+            status: entity.status.clone(),
+            created_at: entity.created_at.clone(),
+            updated_at: entity.updated_at.clone(),
             claim: get_str("claim"),
             evidence: get_str("evidence"),
             sensitivity,
@@ -357,24 +376,10 @@ impl<'a> ParsedEntity<'a> {
             people: scope_list("people"),
             channels: scope_list("channels"),
             confidence,
+            question_id,
+            value_key,
         }
     }
-}
-
-fn question_id_of(entity: &ContextEntity) -> Option<String> {
-    let q = str_of(&entity.data, "questionId")?;
-    if q.is_empty() {
-        None
-    } else {
-        Some(q)
-    }
-}
-
-fn value_of(entity: &ContextEntity) -> serde_json::Value {
-    parse_data(&entity.data)
-        .get("value")
-        .cloned()
-        .unwrap_or(serde_json::Value::Null)
 }
 
 /// Токенизация для релевантности: строчные unicode-слова.
@@ -435,18 +440,26 @@ fn relevance_of_terms(parsed: &ParsedEntity, terms: &[String]) -> i64 {
     if terms.is_empty() {
         return 0;
     }
-    let claim = tokenize(&parsed.claim);
-    let evidence = tokenize(&parsed.evidence);
-    let mut score = 0;
-    for term in terms {
-        if claim.iter().any(|t| t == term) {
-            score += 2;
+    // Не строим Vec<String> для claim и evidence каждой сущности. Для 10k
+    // записей это были сотни тысяч коротких аллокаций; проход по lower-case
+    // строке сохраняет слово-в-слово семантику tokenize/any выше.
+    fn matching_terms(text: &str, terms: &[String]) -> usize {
+        let lower: String = text.chars().flat_map(|c| c.to_lowercase()).collect();
+        let mut matched = vec![false; terms.len()];
+        for token in lower
+            .split(|c: char| !c.is_alphanumeric())
+            .filter(|token| !token.is_empty())
+        {
+            for (index, term) in terms.iter().enumerate() {
+                if !matched[index] && token == term {
+                    matched[index] = true;
+                }
+            }
         }
-        if evidence.iter().any(|t| t == term) {
-            score += 1;
-        }
+        matched.into_iter().filter(|found| *found).count()
     }
-    score
+
+    (matching_terms(&parsed.claim, terms) * 2 + matching_terms(&parsed.evidence, terms)) as i64
 }
 
 /// Ограничение по одному измерению области: пусто = без ограничения.
@@ -483,29 +496,24 @@ fn in_time_window(created_at: &str, since: &Option<String>, until: &Option<Strin
     true
 }
 
-pub struct DedupResult {
-    pub kept: Vec<ContextEntity>,
-    pub superseded_ids: Vec<String>,
+struct DedupResult<'a> {
+    kept: Vec<&'a ParsedEntity>,
+    superseded_ids: Vec<String>,
 }
 
 /// Удаление замещённых дубликатов: из сущностей с одинаковым questionId
 /// (перекомпиляция калибровки) остаётся только самая свежая по updated_at.
 /// Сущности без questionId (legacy) не трогаются. Старые ответы помечаются
 /// в superseded_ids — они не попадают в пак, но видны в отчёте.
-pub fn dedupe_superseded(entities: &[ContextEntity]) -> DedupResult {
-    let mut by_question: Vec<(String, Vec<ContextEntity>)> = Vec::new();
-    let mut index: std::collections::HashMap<String, usize> = std::collections::HashMap::new();
-    let mut standalone: Vec<ContextEntity> = Vec::new();
+fn dedupe_superseded(entities: &[ParsedEntity]) -> DedupResult<'_> {
+    let mut by_question: std::collections::HashMap<&str, Vec<&ParsedEntity>> =
+        std::collections::HashMap::new();
+    let mut standalone: Vec<&ParsedEntity> = Vec::new();
     for entity in entities {
-        match question_id_of(entity) {
-            None => standalone.push(entity.clone()),
+        match entity.question_id.as_deref() {
+            None => standalone.push(entity),
             Some(q) => {
-                if let Some(pos) = index.get(&q) {
-                    by_question[*pos].1.push(entity.clone());
-                } else {
-                    index.insert(q.clone(), by_question.len());
-                    by_question.push((q, vec![entity.clone()]));
-                }
+                by_question.entry(q).or_default().push(entity);
             }
         }
     }
@@ -519,7 +527,7 @@ pub fn dedupe_superseded(entities: &[ContextEntity]) -> DedupResult {
             }
             a.id.cmp(&b.id)
         });
-        let newest = group[0].clone();
+        let newest = group[0];
         kept.push(newest);
         for old in group.iter().skip(1) {
             superseded_ids.push(old.id.clone());
@@ -537,39 +545,31 @@ pub fn dedupe_superseded(entities: &[ContextEntity]) -> DedupResult {
 /// (сортировка по id), каждая сущность участвует максимум в одной паре.
 /// Ключ значения — каноническая форма serde_json (отсортированные ключи
 /// объектов), что семантически эквивалентно JSON.stringify в TS.
-pub fn detect_conflicts(entities: &[ContextEntity]) -> Vec<ContextConflict> {
-    let mut by_question: Vec<(String, Vec<ContextEntity>)> = Vec::new();
-    let mut index: std::collections::HashMap<String, usize> = std::collections::HashMap::new();
+fn detect_conflicts(entities: &[ParsedEntity]) -> Vec<ContextConflict> {
+    let mut by_question: std::collections::HashMap<&str, Vec<&ParsedEntity>> =
+        std::collections::HashMap::new();
     for entity in entities {
-        let Some(q) = question_id_of(entity) else {
+        let Some(q) = entity.question_id.as_deref() else {
             continue;
         };
-        if let Some(pos) = index.get(&q) {
-            by_question[*pos].1.push(entity.clone());
-        } else {
-            index.insert(q.clone(), by_question.len());
-            by_question.push((q, vec![entity.clone()]));
-        }
+        by_question.entry(q).or_default().push(entity);
     }
     let mut conflicts: Vec<ContextConflict> = Vec::new();
     for (question_id, group) in by_question {
-        let mut by_value: Vec<(String, Vec<ContextEntity>)> = Vec::new();
-        let mut vindex: std::collections::HashMap<String, usize> = std::collections::HashMap::new();
+        let mut by_value: std::collections::HashMap<&str, Vec<&ParsedEntity>> =
+            std::collections::HashMap::new();
         for entity in &group {
-            let key = serde_json::to_string(&value_of(entity)).unwrap_or_default();
-            if let Some(pos) = vindex.get(&key) {
-                by_value[*pos].1.push(entity.clone());
-            } else {
-                vindex.insert(key.clone(), by_value.len());
-                by_value.push((key, vec![entity.clone()]));
-            }
+            by_value
+                .entry(entity.value_key.as_str())
+                .or_default()
+                .push(*entity);
         }
         if by_value.len() < 2 {
             continue;
         }
-        let mut representatives: Vec<ContextEntity> = Vec::new();
+        let mut representatives: Vec<&ParsedEntity> = Vec::new();
         for (_, group) in by_value {
-            representatives.push(group[0].clone());
+            representatives.push(group[0]);
         }
         representatives.sort_by(|a, b| a.id.cmp(&b.id));
         let anchor = &representatives[0];
@@ -586,17 +586,17 @@ pub fn detect_conflicts(entities: &[ContextEntity]) -> Vec<ContextConflict> {
 
 fn to_context_item(parsed: &ParsedEntity, relevance: i64) -> ContextItem {
     ContextItem {
-        id: parsed.entity.id.clone(),
-        entity_type: parsed.entity.entity_type.clone(),
-        status: parsed.entity.status.clone(),
+        id: parsed.id.clone(),
+        entity_type: parsed.entity_type.clone(),
+        status: parsed.status.clone(),
         claim: parsed.claim.clone(),
         evidence: parsed.evidence.clone(),
         sensitivity: parsed.sensitivity.clone(),
         domains: parsed.domains.clone(),
         relevance,
-        priority: priority_tier(&parsed.entity.entity_type),
+        priority: priority_tier(&parsed.entity_type),
         confidence: parsed.confidence,
-        updated_at: parsed.entity.updated_at.clone(),
+        updated_at: parsed.updated_at.clone(),
     }
 }
 
@@ -681,19 +681,19 @@ pub fn compile_context(entities: &[ContextEntity], query: &ContextQuery) -> Cont
 
     // Конфликты считаются по сырым данным: повторные ответы на один вопрос с
     // другим значением дают пару (старое значение → новое) ещё до дедупликации.
-    let mut conflicts = detect_conflicts(entities);
+    // Парсим данные ровно один раз; дедупликация, конфликты и фильтры дальше
+    // используют эту подготовленную структуру, а не повторно deserializing JSON.
+    let parsed_entities: Vec<ParsedEntity> = entities.iter().map(ParsedEntity::from).collect();
+    let mut conflicts = detect_conflicts(&parsed_entities);
     conflicts.sort_by(|x, y| format!("{}|{}", x.a, x.b).cmp(&format!("{}|{}", y.a, y.b)));
 
-    let dedup = dedupe_superseded(entities);
+    let dedup = dedupe_superseded(&parsed_entities);
     let mut superseded_ids = dedup.superseded_ids;
     superseded_ids.sort();
 
     let mut items: Vec<ContextItem> = Vec::new();
-    for entity in &dedup.kept {
-        // Один парсинг на сущность: все фильтры и итоговый элемент читают
-        // поля из ParsedEntity, а не из сырого JSON по нескольку раз.
-        let parsed = ParsedEntity::from(entity);
-        if !allowed_statuses.iter().any(|s| s == &entity.status) {
+    for parsed in dedup.kept {
+        if !allowed_statuses.contains(&parsed.status) {
             continue;
         }
         if !allowed_sensitivity.contains(&parsed.sensitivity) {
@@ -711,16 +711,16 @@ pub fn compile_context(entities: &[ContextEntity], query: &ContextQuery) -> Cont
         if !query.domains.is_empty() && !query.domains.iter().any(|d| parsed.domains.contains(d)) {
             continue;
         }
-        if !in_time_window(&entity.created_at, &query.since, &query.until) {
+        if !in_time_window(&parsed.created_at, &query.since, &query.until) {
             continue;
         }
         // Релевантность вычисляется один раз на сущность: и для фильтра, и
         // для итогового элемента (раньше — дважды, с перетокенизацией запроса).
-        let relevance = relevance_of_terms(&parsed, &terms);
+        let relevance = relevance_of_terms(parsed, &terms);
         if !query_text.is_empty() && relevance <= 0 {
             continue;
         }
-        items.push(to_context_item(&parsed, relevance));
+        items.push(to_context_item(parsed, relevance));
     }
     items.sort_by(compare_items);
 
@@ -879,6 +879,39 @@ struct CachedContext {
 
 static CONTEXT_CACHE: Mutex<Option<CachedContext>> = Mutex::new(None);
 
+fn cached_context(
+    db_path: &str,
+    state_revision: i64,
+    policy_revision: i64,
+    fingerprint: &str,
+) -> Option<ContextPack> {
+    let guard = CONTEXT_CACHE.lock().ok()?;
+    let cached = guard.as_ref()?;
+    (cached.db_path == db_path
+        && cached.state_revision == state_revision
+        && cached.policy_revision == policy_revision
+        && cached.fingerprint == fingerprint)
+        .then(|| cached.pack.clone())
+}
+
+fn cache_context(
+    db_path: String,
+    state_revision: i64,
+    policy_revision: i64,
+    fingerprint: String,
+    pack: ContextPack,
+) {
+    if let Ok(mut guard) = CONTEXT_CACHE.lock() {
+        *guard = Some(CachedContext {
+            db_path,
+            state_revision,
+            policy_revision,
+            fingerprint,
+            pack,
+        });
+    }
+}
+
 fn db_file_path(conn: &rusqlite::Connection) -> String {
     conn.query_row("PRAGMA database_list", [], |row| row.get::<_, String>(2))
         .unwrap_or_default()
@@ -896,16 +929,8 @@ pub fn compile_context_cached(
     let state_revision = db::state_revision(conn).map_err(|e| e.to_string())?;
     let policy_revision = db::policy_revision(conn).map_err(|e| e.to_string())?;
     let fingerprint = query_fingerprint(query);
-    if let Ok(guard) = CONTEXT_CACHE.lock() {
-        if let Some(cached) = guard.as_ref() {
-            if cached.db_path == db_path
-                && cached.state_revision == state_revision
-                && cached.policy_revision == policy_revision
-                && cached.fingerprint == fingerprint
-            {
-                return Ok(cached.pack.clone());
-            }
-        }
+    if let Some(pack) = cached_context(&db_path, state_revision, policy_revision, &fingerprint) {
+        return Ok(pack);
     }
 
     let souls = db::list_souls(conn).map_err(|e| format!("Cannot read SOUL database: {e}"))?;
@@ -927,15 +952,13 @@ pub fn compile_context_cached(
     };
     let pack = compile_context(&entities, query);
 
-    if let Ok(mut guard) = CONTEXT_CACHE.lock() {
-        *guard = Some(CachedContext {
-            db_path,
-            state_revision,
-            policy_revision,
-            fingerprint,
-            pack: pack.clone(),
-        });
-    }
+    cache_context(
+        db_path,
+        state_revision,
+        policy_revision,
+        fingerprint,
+        pack.clone(),
+    );
     Ok(pack)
 }
 
@@ -1526,6 +1549,87 @@ mod tests {
             elapsed.as_millis() < 5000,
             "compile over 10k entities took {:?}",
             elapsed
+        );
+    }
+
+    #[test]
+    #[ignore = "run through pnpm release:check; measures the production p95 budget"]
+    fn release_context_p95_is_under_75ms_for_one_thousand_entities() {
+        let mut all: Vec<ContextEntity> = Vec::new();
+        for i in 0..1_000 {
+            all.push(entity(
+                &format!("perf_{i}"),
+                "preference",
+                "active",
+                &format!(
+                    r#"{{"claim":"Performance memory {i} about topic_{}","evidence":"notes","questionId":"perf_{i}","value":"v{i}","confidence":0.5,"sensitivity":"internal","scope":{{"domains":["memory"],"projects":[],"people":[],"channels":[]}}}}"#,
+                    i % 50
+                ),
+                "2026-01-01T00:00:00Z",
+                "2026-01-01T00:00:00Z",
+            ));
+        }
+        let q = query(ContextQuery {
+            text: "topic 7".to_string(),
+            ..ContextQuery::default()
+        });
+        let _ = compile_context(&all, &q); // warmup
+
+        let mut samples: Vec<std::time::Duration> = Vec::new();
+        for _ in 0..25 {
+            let start = std::time::Instant::now();
+            let pack = compile_context(&all, &q);
+            assert!(pack.token_estimate <= pack.max_tokens);
+            samples.push(start.elapsed());
+        }
+        samples.sort_unstable();
+        let p95 = samples[(samples.len() * 95).div_ceil(100) - 1];
+        eprintln!("release cold context p95 over 1k entities: {p95:?}");
+        assert!(
+            p95 < std::time::Duration::from_millis(75),
+            "release context p95 exceeded 75ms: {p95:?}"
+        );
+    }
+
+    #[test]
+    #[ignore = "run through pnpm release:check; measures the cached production path"]
+    fn release_cached_context_p95_is_under_75ms_for_ten_thousand_entities() {
+        let mut all: Vec<ContextEntity> = Vec::new();
+        for i in 0..10_000 {
+            all.push(entity(
+                &format!("cache_{i}"),
+                "preference",
+                "active",
+                &format!(
+                    r#"{{"claim":"Cached performance memory {i} about topic_{}","questionId":"cache_{i}","value":"v{i}","confidence":0.5,"sensitivity":"internal","scope":{{"domains":["memory"],"projects":[],"people":[],"channels":[]}}}}"#,
+                    i % 50
+                ),
+                "2026-01-01T00:00:00Z",
+                "2026-01-01T00:00:00Z",
+            ));
+        }
+        let q = query(ContextQuery {
+            text: "topic 7".to_string(),
+            ..ContextQuery::default()
+        });
+        let fingerprint = query_fingerprint(&q);
+        let cache_key = format!("release-cache-benchmark-{}", uuid::Uuid::new_v4());
+        let pack = compile_context(&all, &q);
+        cache_context(cache_key.clone(), 1, 1, fingerprint.clone(), pack);
+
+        let mut samples: Vec<std::time::Duration> = Vec::new();
+        for _ in 0..100 {
+            let start = std::time::Instant::now();
+            let pack = cached_context(&cache_key, 1, 1, &fingerprint).expect("cache hit");
+            assert!(pack.token_estimate <= pack.max_tokens);
+            samples.push(start.elapsed());
+        }
+        samples.sort_unstable();
+        let p95 = samples[(samples.len() * 95).div_ceil(100) - 1];
+        eprintln!("release cached context p95 over 10k entities: {p95:?}");
+        assert!(
+            p95 < std::time::Duration::from_millis(75),
+            "release cached context p95 exceeded 75ms: {p95:?}"
         );
     }
 }

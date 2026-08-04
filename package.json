@@ -17,6 +17,7 @@
     "lint:fix": "eslint src/ browser/src/ --fix",
     "format": "prettier --check src/",
     "format:write": "prettier --write src/",
+    "release:check": "powershell -NoProfile -ExecutionPolicy Bypass -File scripts/release-check.ps1",
     "tauri": "tauri"
   },
   "dependencies": {

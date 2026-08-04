@@ -943,6 +943,39 @@ mod tests {
     }
 
     #[test]
+    #[ignore = "run through pnpm release:check; measures the production p95 budget"]
+    fn release_policy_p95_is_under_5ms() {
+        let env = TestEnv::new();
+        create_policy(
+            &env.conn,
+            &mk_rule(
+                "perf_rule",
+                100,
+                Effect::RequireConfirmation,
+                r#"{"gt":["action.amount",500]}"#,
+            ),
+        )
+        .unwrap();
+        let action = purchase(Some(600.0));
+        let _ = evaluate(&env.conn, &action); // warmup
+
+        let mut samples: Vec<std::time::Duration> = Vec::new();
+        for _ in 0..100 {
+            let start = std::time::Instant::now();
+            let decision = evaluate(&env.conn, &action).unwrap();
+            assert_eq!(decision.effect, Effect::RequireConfirmation);
+            samples.push(start.elapsed());
+        }
+        samples.sort_unstable();
+        let p95 = samples[(samples.len() * 95).div_ceil(100) - 1];
+        eprintln!("release policy p95: {p95:?}");
+        assert!(
+            p95 < std::time::Duration::from_millis(5),
+            "release policy p95 exceeded 5ms: {p95:?}"
+        );
+    }
+
+    #[test]
     fn eval_kind_and_domain_match() {
         let env = TestEnv::new();
         let conn = &env.conn;

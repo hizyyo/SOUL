@@ -34,7 +34,7 @@
 - `pnpm exec tsc --noEmit`: **PASS**.
 - `pnpm lint`: **PASS**.
 - `pnpm format`: **PASS**.
-- `cargo test --release --lib compile_context_over_ten_thousand_entities_is_fast`: **не запущен до теста**: текущий Windows toolchain завершает сборку сторонних `serde_core` и `cc` с `lld-link.exe` exit code 1 без Rust-диагностики. Debug-тесты и clippy проходят; это внешнее ограничение окружения, не регрессия исходников SOUL. Release p95 нужно снять на исправленном toolchain до production gate.
+- `pnpm release:check`: **PASS** на Windows/MSVC. Глобальный LLVM-MinGW `lld-link` оказался несовместим с vendored OpenSSL; project script поднимает MSVC Build Tools и локально переопределяет linker. Измерения release: policy p95 **12 µs**, cold context p95 на 1 000 сущностей **8.7759 ms**, cached context p95 на 10 000 сущностей **7.4 µs**.
 
 ## Изменённые файлы
 
@@ -47,8 +47,7 @@
 
 ## Оставшийся production gate
 
-1. Исправить/стандартизировать Windows release linker и снять измерение Rust cached-context p95 на 1 000 и 10 000 сущностях.
-2. Не включать биллинг или production distribution до kill criteria, внешнего P0-тестирования и явного решения основателя (см. `docs/PRODUCTION_READINESS.md`).
+1. Не включать биллинг или production distribution до kill criteria, внешнего P0-тестирования и явного решения основателя (см. `docs/PRODUCTION_READINESS.md`).
 
 ## Коммит
 
