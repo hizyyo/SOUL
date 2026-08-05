@@ -1,0 +1,2 @@
+participant_code,session_date,consent,started,calibration_complete,client_connected,blind_rounds,soul_wins,b1_wins,ties,first_useful_context_seconds,correction_burden,day_7_returned,day_28_returned,second_client_connected,wtp_band,privacy_objection,boundary_violation,evidence_reference,notes_summary
+P__,YYYY-MM-DD,yes,no,no,no,0,0,0,0,,,,,,,,,

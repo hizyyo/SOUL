@@ -12,6 +12,7 @@ import {
   COMPANION_SITES,
   type BridgeStatus,
 } from '../data/bridge';
+import { safeErrorMessage } from '../data/safeError';
 
 interface SoulInfo {
   soul_id: string;
@@ -98,6 +99,7 @@ interface ContextUsageStats {
 type ModalState =
   | { kind: 'none' }
   | { kind: 'export-passphrase' }
+  | { kind: 'restore-privacy' }
   | { kind: 'restore-passphrase'; filePath: string }
   | { kind: 'restore-preview'; filePath: string; password: string; preview: ImportPreview }
   | { kind: 'restore-done'; soulId: string }
@@ -175,8 +177,8 @@ export function Settings({ soul, entities, onDataChanged, onGoHome }: SettingsPr
     try {
       setBridge(await invoke<BridgeStatus>('register_bridge_cmd'));
       setSuccess('Browser Companion host зарегистрирован для Chrome и Edge.');
-    } catch (e) {
-      setError(String(e));
+    } catch {
+      setError(safeErrorMessage('настроить Browser Companion'));
     } finally {
       setBusy(null);
     }
@@ -189,8 +191,8 @@ export function Settings({ soul, entities, onDataChanged, onGoHome }: SettingsPr
     try {
       setBridge(await invoke<BridgeStatus>('unregister_bridge_cmd'));
       setSuccess('Browser Companion host отключён: веб-чаты работают как обычно.');
-    } catch (e) {
-      setError(String(e));
+    } catch {
+      setError(safeErrorMessage('отключить Browser Companion'));
     } finally {
       setBusy(null);
     }
@@ -209,8 +211,8 @@ export function Settings({ soul, entities, onDataChanged, onGoHome }: SettingsPr
       await invoke<null>('connect_client_cmd', { client });
       setSuccess(`${client} connected to the local MCP server.`);
       await loadClients();
-    } catch (e) {
-      setError(String(e));
+    } catch {
+      setError(safeErrorMessage('подключить AI-клиент'));
       await loadClients();
     } finally {
       setBusy(null);
@@ -224,8 +226,8 @@ export function Settings({ soul, entities, onDataChanged, onGoHome }: SettingsPr
       await invoke<null>('disconnect_client_cmd', { client });
       setSuccess(`${client} disconnected. The config was restored.`);
       await loadClients();
-    } catch (e) {
-      setError(String(e));
+    } catch {
+      setError(safeErrorMessage('отключить AI-клиент'));
       await loadClients();
     } finally {
       setBusy(null);
@@ -239,8 +241,8 @@ export function Settings({ soul, entities, onDataChanged, onGoHome }: SettingsPr
       await invoke<null>('rollback_client_cmd', { client });
       setSuccess(`${client} rolled back to the backup state.`);
       await loadClients();
-    } catch (e) {
-      setError(String(e));
+    } catch {
+      setError(safeErrorMessage('восстановить конфигурацию клиента'));
       await loadClients();
     } finally {
       setBusy(null);
@@ -272,8 +274,8 @@ export function Settings({ soul, entities, onDataChanged, onGoHome }: SettingsPr
         `Backup saved (${receipt.entity_count} entities, ${receipt.event_count} events, ${formatSize(receipt.size_bytes)}). Hash: ${shortHash(receipt.content_hash)}`,
       );
       closeModal();
-    } catch (e) {
-      setError(String(e));
+    } catch {
+      setError(safeErrorMessage('сохранить резервную копию'));
     } finally {
       setBusy(null);
     }
@@ -295,8 +297,8 @@ export function Settings({ soul, entities, onDataChanged, onGoHome }: SettingsPr
         path: ensureExtension(path, '.json'),
       });
       setSuccess(`JSON export saved (${formatSize(receipt.size_bytes)}).`);
-    } catch (e) {
-      setError(String(e));
+    } catch {
+      setError(safeErrorMessage('экспортировать JSON'));
     } finally {
       setBusy(null);
     }
@@ -318,8 +320,8 @@ export function Settings({ soul, entities, onDataChanged, onGoHome }: SettingsPr
         path: ensureExtension(path, '.md'),
       });
       setSuccess(`Markdown summary saved (${formatSize(receipt.size_bytes)}).`);
-    } catch (e) {
-      setError(String(e));
+    } catch {
+      setError(safeErrorMessage('экспортировать Markdown'));
     } finally {
       setBusy(null);
     }
@@ -327,14 +329,18 @@ export function Settings({ soul, entities, onDataChanged, onGoHome }: SettingsPr
 
   const handleRestoreStart = async () => {
     setError(null);
-    const filePath = await open({
-      title: 'Restore SOUL backup',
-      multiple: false,
-      directory: false,
-      filters: [{ name: 'SOUL backup', extensions: ['soul'] }],
-    });
-    if (!filePath) return;
-    setModal({ kind: 'restore-passphrase', filePath });
+    try {
+      const filePath = await open({
+        title: 'Restore SOUL backup',
+        multiple: false,
+        directory: false,
+        filters: [{ name: 'SOUL backup', extensions: ['soul'] }],
+      });
+      if (!filePath) return;
+      setModal({ kind: 'restore-passphrase', filePath });
+    } catch {
+      setError(safeErrorMessage('выбрать резервную копию'));
+    }
   };
 
   const handleRestoreInspect = async (filePath: string, password: string) => {
@@ -346,8 +352,8 @@ export function Settings({ soul, entities, onDataChanged, onGoHome }: SettingsPr
         password,
       });
       setModal({ kind: 'restore-preview', filePath, password, preview });
-    } catch (e) {
-      setError(String(e));
+    } catch {
+      setError(safeErrorMessage('проверить резервную копию'));
     } finally {
       setBusy(null);
     }
@@ -361,8 +367,8 @@ export function Settings({ soul, entities, onDataChanged, onGoHome }: SettingsPr
       setModal({ kind: 'restore-done', soulId: restored.soul_id });
       setSuccess('SOUL restored from backup.');
       await onDataChanged();
-    } catch (e) {
-      setError(String(e));
+    } catch {
+      setError(safeErrorMessage('восстановить резервную копию'));
     } finally {
       setBusy(null);
     }
@@ -376,8 +382,8 @@ export function Settings({ soul, entities, onDataChanged, onGoHome }: SettingsPr
       const receipt = await invoke<DeletionReceipt>('delete_soul_cmd', { soulId: soul.soul_id });
       setModal({ kind: 'delete-receipt', receipt });
       await onDataChanged();
-    } catch (e) {
-      setError(String(e));
+    } catch {
+      setError(safeErrorMessage('удалить локальные данные'));
     } finally {
       setBusy(null);
     }
@@ -484,7 +490,11 @@ export function Settings({ soul, entities, onDataChanged, onGoHome }: SettingsPr
           anything changes, and restoring replaces the current local data after you confirm a
           preview.
         </p>
-        <button onClick={handleRestoreStart} disabled={busy !== null} style={secondaryBtnStyle}>
+        <button
+          onClick={() => setModal({ kind: 'restore-privacy' })}
+          disabled={busy !== null}
+          style={secondaryBtnStyle}
+        >
           Restore from backup
         </button>
       </Section>
@@ -701,6 +711,42 @@ export function Settings({ soul, entities, onDataChanged, onGoHome }: SettingsPr
           onSubmit={(password) => handleExportBackup(password)}
           onClose={closeModal}
         />
+      )}
+
+      {modal.kind === 'restore-privacy' && (
+        <div style={modalBackdropStyle}>
+          <div
+            style={modalCardStyle}
+            role="dialog"
+            aria-modal="true"
+            aria-labelledby="restore-privacy-title"
+          >
+            <h3 id="restore-privacy-title" style={{ margin: '0 0 8px' }}>
+              Перед восстановлением
+            </h3>
+            <p style={{ fontSize: '13px', color: '#4b5563', lineHeight: 1.5 }}>
+              Файл и пароль обрабатываются локально. Ничего не отправляется в сеть. Сначала SOUL
+              проверит подпись, hash и схему, затем покажет preview. Локальные данные заменяются
+              только после отдельного подтверждения.
+            </p>
+            <div
+              style={{ marginTop: '16px', display: 'flex', gap: '8px', justifyContent: 'flex-end' }}
+            >
+              <button onClick={closeModal} style={secondaryBtnStyle}>
+                Cancel
+              </button>
+              <button
+                onClick={() => {
+                  closeModal();
+                  void handleRestoreStart();
+                }}
+                style={primaryBtnStyle}
+              >
+                Choose backup
+              </button>
+            </div>
+          </div>
+        </div>
       )}
 
       {modal.kind === 'restore-passphrase' && (

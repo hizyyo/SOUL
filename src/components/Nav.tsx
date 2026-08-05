@@ -1,8 +1,13 @@
-export type Tab = 'home' | 'inbox' | 'preview' | 'tests' | 'context' | 'policies' | 'settings';
+import { useRef } from 'react';
+import { tabIndexForKey } from '../data/nav';
+
+export type Tab =
+  'home' | 'inbox' | 'preview' | 'tests' | 'context' | 'policies' | 'settings' | 'demo';
 
 interface NavProps {
   active: Tab;
   onTab: (tab: Tab) => void;
+  onDemo: () => void;
   candidateCount: number;
   entityCount: number;
 }
@@ -13,24 +18,48 @@ const TABS: { id: Tab; label: string }[] = [
   { id: 'tests', label: 'Tests' },
   { id: 'context', label: 'Context' },
   { id: 'policies', label: 'Policies' },
+  { id: 'demo', label: 'Demo' },
   { id: 'settings', label: 'Settings' },
 ];
 
-export function Nav({ active, onTab, candidateCount, entityCount }: NavProps) {
+export function Nav({ active, onTab, onDemo, candidateCount, entityCount }: NavProps) {
+  const buttons = useRef<Array<HTMLButtonElement | null>>([]);
+  const choose = (tab: Tab) => {
+    if (tab === 'demo') {
+      onDemo();
+      return;
+    }
+    onTab(tab);
+  };
   return (
     <nav
+      aria-label="Основная навигация"
+      role="tablist"
+      className="nav-tabs"
       style={{
         display: 'flex',
-        gap: '4px',
-        padding: '8px',
-        borderBottom: '1px solid #ddd',
-        marginBottom: '16px',
       }}
     >
-      {TABS.map((t) => (
+      {TABS.map((t, index) => (
         <button
           key={t.id}
-          onClick={() => onTab(t.id)}
+          ref={(button) => {
+            buttons.current[index] = button;
+          }}
+          role="tab"
+          aria-selected={active === t.id}
+          aria-controls="main-panel"
+          tabIndex={active === t.id ? 0 : -1}
+          onClick={() => choose(t.id)}
+          onKeyDown={(event) => {
+            const next = tabIndexForKey(index, TABS.length, event.key);
+            if (next === null) return;
+            const nextTab = TABS[next];
+            if (!nextTab) return;
+            event.preventDefault();
+            choose(nextTab.id);
+            buttons.current[next]?.focus();
+          }}
           style={{
             padding: '6px 16px',
             border: 'none',
@@ -66,9 +95,7 @@ export function Nav({ active, onTab, candidateCount, entityCount }: NavProps) {
           )}
         </button>
       ))}
-      <span style={{ marginLeft: 'auto', fontSize: '12px', color: '#888', alignSelf: 'center' }}>
-        {entityCount} entities
-      </span>
+      <span className="nav-count">{entityCount} entities</span>
     </nav>
   );
 }

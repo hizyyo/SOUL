@@ -8,8 +8,10 @@ import { Tests } from './pages/Tests';
 import { ContextPage } from './pages/Context';
 import { Policies } from './pages/Policies';
 import { Settings } from './pages/Settings';
+import { Demo } from './pages/Demo';
 import { CALIBRATION_STEPS, TOTAL_STEPS, type CalibrationAnswer } from './data/calibration';
 import { compileAnswers } from './data/compile';
+import { safeErrorMessage } from './data/safeError';
 
 interface SoulInfo {
   soul_id: string;
@@ -86,6 +88,7 @@ function parseCalibrationAnswers(raw: string): CalibrationAnswer[] {
 }
 
 export function App() {
+  const demoOnly = new URLSearchParams(window.location.search).get('demo') === '1';
   const [tab, setTab] = useState<Tab>('home');
   const [soul, setSoul] = useState<SoulInfo | null>(null);
   const [entities, setEntities] = useState<EntityInfo[]>([]);
@@ -98,8 +101,9 @@ export function App() {
   const [busyEntityId, setBusyEntityId] = useState<string | null>(null);
   const [lastReview, setLastReview] = useState<LastReview | null>(null);
   const [connectedClients, setConnectedClients] = useState(0);
+  const [startupFailed, setStartupFailed] = useState(false);
 
-  const deviceId = getDeviceId();
+  const deviceId = demoOnly ? 'demo-device' : getDeviceId();
 
   const loadConnectedClients = async () => {
     try {
@@ -129,16 +133,23 @@ export function App() {
         }
       }
       setEntities(ents);
+      setStartupFailed(false);
       return s;
     } catch {
       setSoul(null);
       setEntities([]);
       setCalAnswers([]);
+      setStartupFailed(true);
+      setError(safeErrorMessage('загрузить локальные данные'));
       return null;
     }
   };
 
   useEffect(() => {
+    if (demoOnly) {
+      setLoading(false);
+      return;
+    }
     const avail = isTauri();
     setTauriAvailable(avail);
     if (avail) {
@@ -152,8 +163,9 @@ export function App() {
   }, []);
 
   useEffect(() => {
+    if (demoOnly) return;
     void loadConnectedClients();
-  }, [tab]);
+  }, [demoOnly, tab]);
 
   const refreshEntities = async (soulId: string) => {
     const ents = await invoke<EntityInfo[]>('list_entities_cmd', { soulId });
@@ -171,8 +183,8 @@ export function App() {
       });
       setSoul(s);
       setEntities([]);
-    } catch (e) {
-      setError(String(e));
+    } catch {
+      setError(safeErrorMessage('создать SOUL'));
     }
   };
 
@@ -191,7 +203,7 @@ export function App() {
         answers: JSON.stringify(answers),
       });
     } catch (e) {
-      setError(String(e));
+      setError(safeErrorMessage('сохранить калибровку'));
       throw e;
     }
   };
@@ -235,8 +247,8 @@ export function App() {
       const s = await invoke<SoulInfo>('get_soul_cmd', { soulId: soul.soul_id });
       if (s) setSoul(s);
       await refreshEntities(soul.soul_id);
-    } catch (e) {
-      setError(String(e));
+    } catch {
+      setError(safeErrorMessage('завершить калибровку'));
     }
     setTab('preview');
   };
@@ -250,8 +262,8 @@ export function App() {
         deviceId,
       });
       setSoul(s);
-    } catch (e) {
-      setError(String(e));
+    } catch {
+      setError(safeErrorMessage('подтвердить preview'));
     }
   };
 
@@ -264,8 +276,8 @@ export function App() {
         deviceId,
       });
       setSoul(s);
-    } catch (e) {
-      setError(String(e));
+    } catch {
+      setError(safeErrorMessage('сбросить preview'));
     }
   };
 
@@ -281,8 +293,8 @@ export function App() {
       setSoul(s);
       await refreshEntities(soul.soul_id);
       setTab('home');
-    } catch (e) {
-      setError(String(e));
+    } catch {
+      setError(safeErrorMessage('активировать SOUL'));
     }
   };
 
@@ -298,8 +310,8 @@ export function App() {
       });
       if (soul) await refreshEntities(soul.soul_id);
       return true;
-    } catch (e) {
-      setError(String(e));
+    } catch {
+      setError(safeErrorMessage('обновить запись'));
       return false;
     } finally {
       setBusyEntityId(null);
@@ -347,12 +359,20 @@ export function App() {
         deviceId,
       });
       await refreshEntities(soul.soul_id);
-    } catch (e) {
-      setError(String(e));
+    } catch {
+      setError(safeErrorMessage('изменить запись'));
     } finally {
       setBusyEntityId(null);
     }
   };
+
+  if (demoOnly) {
+    return (
+      <div className="app-shell">
+        <Demo onExit={() => window.location.assign(window.location.pathname)} />
+      </div>
+    );
+  }
 
   if (!tauriAvailable) {
     return (
@@ -367,33 +387,17 @@ export function App() {
   const candidateCount = entities.filter((e) => e.status === 'candidate').length;
 
   return (
-    <div
-      style={{
-        padding: '16px 24px',
-        fontFamily: 'system-ui, sans-serif',
-        maxWidth: '720px',
-        margin: '0 auto',
-      }}
-    >
+    <div className="app-shell">
       <Nav
         active={tab}
         onTab={setTab}
+        onDemo={() => window.location.assign(`${window.location.pathname}?demo=1`)}
         candidateCount={candidateCount}
         entityCount={entities.length}
       />
 
       {error && (
-        <div
-          style={{
-            padding: '8px 12px',
-            background: '#fef2f2',
-            border: '1px solid #fecaca',
-            borderRadius: '6px',
-            marginBottom: '12px',
-            color: '#dc2626',
-            fontSize: '13px',
-          }}
-        >
+        <div className="app-error" role="alert">
           {error}
           <button
             onClick={() => setError(null)}
@@ -410,70 +414,90 @@ export function App() {
         </div>
       )}
 
-      {showCalibration && soul ? (
-        <Calibration
-          soulId={soul.soul_id}
-          initialStep={soul.calibration_step}
-          initialAnswers={calAnswers}
-          onSave={handleSaveCalibration}
-          onComplete={handleCalibrationComplete}
-          onBack={() => setShowCalibration(false)}
-        />
-      ) : tab === 'preview' && soul && !soul.activated ? (
-        <Preview
-          entities={entities}
-          previewConfirmed={soul.preview_confirmed}
-          busyId={busyEntityId}
-          onEdit={handleEditEntity}
-          onConfirmPreview={handleConfirmPreview}
-          onResetPreview={handleResetPreview}
-          onActivate={handleActivatePreview}
-          onBack={() => setTab('home')}
-        />
-      ) : tab === 'home' ? (
-        <Home
-          soul={soul}
-          onCreate={handleCreate}
-          onStartCalibration={handleStartCalibration}
-          onContinueCalibration={() => setShowCalibration(true)}
-          onGoToPreview={() => setTab('preview')}
-          onGoToInbox={() => setTab('inbox')}
-          onGoToSettings={() => setTab('settings')}
-          displayName={displayName}
-          onDisplayNameChange={setDisplayName}
-          error={null}
-          loading={loading}
-          entityCount={entities.filter((e) => e.status === 'active').length}
-          candidateCount={candidateCount}
-          rejectedCount={entities.filter((e) => e.status === 'rejected').length}
-          previewConfirmed={soul ? soul.preview_confirmed : false}
-          connectedClients={connectedClients}
-        />
-      ) : tab === 'inbox' ? (
-        <Inbox
-          entities={entities}
-          onConfirm={handleConfirmEntity}
-          onReject={handleRejectEntity}
-          onEdit={handleEditEntity}
-          onUndo={handleUndoEntity}
-          onDismissUndo={() => setLastReview(null)}
-          lastReview={lastReview}
-          busyId={busyEntityId}
-        />
-      ) : tab === 'tests' ? (
-        <Tests soul={soul} entities={entities} />
-      ) : tab === 'context' ? (
-        <ContextPage soul={soul} entities={entities} />
-      ) : tab === 'policies' ? (
-        <Policies />
-      ) : (
-        <Settings
-          soul={soul}
-          entities={entities}
-          onDataChanged={loadData}
-          onGoHome={() => setTab('home')}
-        />
-      )}
+      <main id="main-panel" role="tabpanel" tabIndex={-1}>
+        {startupFailed ? (
+          <section aria-labelledby="startup-error-title">
+            <h2 id="startup-error-title">Не удалось открыть локальные данные</h2>
+            <p>
+              SOUL ничего не изменял. Проверьте, что приложение имеет доступ к своим локальным
+              файлам, затем повторите.
+            </p>
+            <button
+              onClick={() => {
+                setLoading(true);
+                void loadData()
+                  .then(() => loadConnectedClients())
+                  .finally(() => setLoading(false));
+              }}
+            >
+              Повторить загрузку
+            </button>
+          </section>
+        ) : showCalibration && soul ? (
+          <Calibration
+            soulId={soul.soul_id}
+            initialStep={soul.calibration_step}
+            initialAnswers={calAnswers}
+            onSave={handleSaveCalibration}
+            onComplete={handleCalibrationComplete}
+            onBack={() => setShowCalibration(false)}
+          />
+        ) : tab === 'preview' && soul && !soul.activated ? (
+          <Preview
+            entities={entities}
+            previewConfirmed={soul.preview_confirmed}
+            busyId={busyEntityId}
+            onEdit={handleEditEntity}
+            onConfirmPreview={handleConfirmPreview}
+            onResetPreview={handleResetPreview}
+            onActivate={handleActivatePreview}
+            onBack={() => setTab('home')}
+          />
+        ) : tab === 'home' ? (
+          <Home
+            soul={soul}
+            onCreate={handleCreate}
+            onStartCalibration={handleStartCalibration}
+            onContinueCalibration={() => setShowCalibration(true)}
+            onGoToPreview={() => setTab('preview')}
+            onGoToInbox={() => setTab('inbox')}
+            onGoToSettings={() => setTab('settings')}
+            displayName={displayName}
+            onDisplayNameChange={setDisplayName}
+            error={null}
+            loading={loading}
+            entityCount={entities.filter((e) => e.status === 'active').length}
+            candidateCount={candidateCount}
+            rejectedCount={entities.filter((e) => e.status === 'rejected').length}
+            previewConfirmed={soul ? soul.preview_confirmed : false}
+            connectedClients={connectedClients}
+          />
+        ) : tab === 'inbox' ? (
+          <Inbox
+            entities={entities}
+            onConfirm={handleConfirmEntity}
+            onReject={handleRejectEntity}
+            onEdit={handleEditEntity}
+            onUndo={handleUndoEntity}
+            onDismissUndo={() => setLastReview(null)}
+            lastReview={lastReview}
+            busyId={busyEntityId}
+          />
+        ) : tab === 'tests' ? (
+          <Tests soul={soul} entities={entities} />
+        ) : tab === 'context' ? (
+          <ContextPage soul={soul} entities={entities} />
+        ) : tab === 'policies' ? (
+          <Policies />
+        ) : (
+          <Settings
+            soul={soul}
+            entities={entities}
+            onDataChanged={loadData}
+            onGoHome={() => setTab('home')}
+          />
+        )}
+      </main>
     </div>
   );
 }

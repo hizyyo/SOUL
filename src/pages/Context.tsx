@@ -10,6 +10,7 @@ import {
   type ContextEntity,
   type SensitivityLevel,
 } from '../data/context';
+import { safeErrorMessage } from '../data/safeError';
 
 interface SoulInfo {
   soul_id: string;
@@ -114,6 +115,7 @@ export function ContextPage({ soul, entities }: { soul: SoulInfo | null; entitie
   const [hits, setHits] = useState<EntityInfo[]>([]);
   const [hitsTruncated, setHitsTruncated] = useState(false);
   const [searching, setSearching] = useState(false);
+  const [searchError, setSearchError] = useState<string | null>(null);
   const [domains, setDomains] = useState<string[]>([]);
   const [sensitivity, setSensitivity] = useState<SensitivityLevel[]>([]);
   const [statuses, setStatuses] = useState<string[]>([]);
@@ -131,9 +133,11 @@ export function ContextPage({ soul, entities }: { soul: SoulInfo | null; entitie
       setHits([]);
       setHitsTruncated(false);
       setSearching(false);
+      setSearchError(null);
       return;
     }
     setSearching(true);
+    setSearchError(null);
     timerRef.current = window.setTimeout(() => {
       invoke<SearchResponse>('search_entities_cmd', {
         soulId: soul.soul_id,
@@ -150,6 +154,7 @@ export function ContextPage({ soul, entities }: { soul: SoulInfo | null; entitie
           if (requestSeqRef.current === seq) {
             setHits([]);
             setHitsTruncated(false);
+            setSearchError(safeErrorMessage('выполнить поиск'));
           }
         })
         .finally(() => {
@@ -252,6 +257,12 @@ export function ContextPage({ soul, entities }: { soul: SoulInfo | null; entitie
             </div>
           )}
         </div>
+      )}
+
+      {searchError && (
+        <p role="alert" style={{ color: '#991b1b', fontSize: '13px', margin: '0 0 12px' }}>
+          {searchError}
+        </p>
       )}
 
       <div style={{ marginBottom: '8px' }}>

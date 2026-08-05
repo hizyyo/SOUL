@@ -49,9 +49,9 @@ export function Home({
 }: HomeProps) {
   if (loading) {
     return (
-      <div>
-        <h2>SOUL</h2>
-        <p>Loading...</p>
+      <div aria-busy="true" aria-live="polite">
+        <h2>Загружаем локальный SOUL</h2>
+        <p>Проверяем только данные на этом устройстве. Это может занять несколько секунд.</p>
       </div>
     );
   }

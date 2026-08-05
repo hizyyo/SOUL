@@ -20,6 +20,7 @@ import {
   type RevealResult,
 } from '../data/eval';
 import type { ContextEntity } from '../data/context';
+import { safeErrorMessage } from '../data/safeError';
 
 interface SoulInfo {
   soul_id: string;
@@ -152,7 +153,10 @@ export function Tests({ soul, entities }: Props) {
     if (!soul) return;
     invoke<EvaluationRecord[]>('list_evaluations_cmd', { soulId: soul.soul_id })
       .then(setRecords)
-      .catch(() => setRecords([]));
+      .catch(() => {
+        setRecords([]);
+        setError(safeErrorMessage('загрузить историю тестов'));
+      });
   }, [soul]);
 
   const stats = useMemo(() => computeEvalStats(records), [records]);
@@ -209,8 +213,8 @@ export function Tests({ soul, entities }: Props) {
       setActiveRecord(created);
       setRecords((prev) => [created, ...prev]);
       setPhase('choice');
-    } catch (e) {
-      setError(String(e));
+    } catch {
+      setError(safeErrorMessage('сохранить раунд теста'));
     } finally {
       setBusy(false);
     }
@@ -232,8 +236,8 @@ export function Tests({ soul, entities }: Props) {
         return [done, ...rest];
       });
       setPhase('reveal');
-    } catch (e) {
-      setError(String(e));
+    } catch {
+      setError(safeErrorMessage('сохранить выбор'));
     } finally {
       setBusy(false);
     }
@@ -251,8 +255,8 @@ export function Tests({ soul, entities }: Props) {
         soulId: soul.soul_id,
       });
       setRecords(list);
-    } catch (e) {
-      setError(String(e));
+    } catch {
+      setError(safeErrorMessage('удалить раунд теста'));
     }
   };
 

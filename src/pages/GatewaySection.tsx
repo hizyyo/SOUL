@@ -20,6 +20,7 @@ import {
   type GatewayStatus,
 } from '../data/gateway';
 import { EffectBadge } from './PolicyBadges';
+import { safeErrorMessage } from '../data/safeError';
 
 declare global {
   interface Window {
@@ -232,8 +233,8 @@ export function GatewaySection() {
       setCapabilities(c);
       setConnectors(ch);
       setLoadError(null);
-    } catch (e) {
-      setLoadError(String(e));
+    } catch {
+      setLoadError(safeErrorMessage('загрузить данные Gateway'));
     }
   }, []);
 
@@ -266,8 +267,8 @@ export function GatewaySection() {
         });
       }
       await refresh();
-    } catch (e) {
-      setProposeError(String(e));
+    } catch {
+      setProposeError(safeErrorMessage('предложить действие'));
     } finally {
       setBusy(false);
     }
@@ -288,8 +289,8 @@ export function GatewaySection() {
       });
       setExecution(result);
       await refresh();
-    } catch (e) {
-      setExecuteError(String(e));
+    } catch {
+      setExecuteError(safeErrorMessage('выполнить имитацию'));
     } finally {
       setBusy(false);
     }
@@ -303,8 +304,8 @@ export function GatewaySection() {
       });
       setProposal((p) => (p ? { ...p, capability: confirmed } : p));
       await refresh();
-    } catch (e) {
-      setProposeError(String(e));
+    } catch {
+      setProposeError(safeErrorMessage('подтвердить capability'));
     } finally {
       setBusy(false);
     }
@@ -328,8 +329,8 @@ export function GatewaySection() {
       setNewAccountId('');
       setNewEnvironment('');
       await refresh();
-    } catch (e) {
-      setRegistryError(String(e));
+    } catch {
+      setRegistryError(safeErrorMessage('добавить канал'));
     } finally {
       setBusy(false);
     }
@@ -344,8 +345,8 @@ export function GatewaySection() {
         environment: c.environment,
       });
       await refresh();
-    } catch (e) {
-      setRegistryError(String(e));
+    } catch {
+      setRegistryError(safeErrorMessage('удалить канал'));
     } finally {
       setBusy(false);
     }

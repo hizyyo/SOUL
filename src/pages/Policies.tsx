@@ -11,6 +11,7 @@ import {
 } from '../data/policy';
 import { EffectBadge } from './PolicyBadges';
 import { GatewaySection } from './GatewaySection';
+import { safeErrorMessage } from '../data/safeError';
 
 declare global {
   interface Window {
@@ -96,8 +97,8 @@ export function Policies() {
     try {
       setRows(await invoke<PolicyRow[]>('list_policies_cmd'));
       setLoadError(null);
-    } catch (e) {
-      setLoadError(String(e));
+    } catch {
+      setLoadError(safeErrorMessage('загрузить политики'));
     }
   }, []);
 
@@ -125,8 +126,8 @@ export function Policies() {
       await invoke<PolicyRow>('create_policy_cmd', { ruleJson });
       setCreateOk('Rule created.');
       await load();
-    } catch (e) {
-      setCreateError(String(e));
+    } catch {
+      setCreateError(safeErrorMessage('создать правило'));
     }
   };
 
@@ -139,8 +140,8 @@ export function Policies() {
         enabled: !row.enabled,
       });
       await load();
-    } catch (e) {
-      setLoadError(String(e));
+    } catch {
+      setLoadError(safeErrorMessage('обновить правило'));
     } finally {
       setBusyId(null);
     }
@@ -152,8 +153,8 @@ export function Policies() {
     try {
       await invoke('delete_policy_cmd', { policyId: id });
       await load();
-    } catch (e) {
-      setLoadError(String(e));
+    } catch {
+      setLoadError(safeErrorMessage('удалить правило'));
     } finally {
       setBusyId(null);
     }
@@ -164,8 +165,8 @@ export function Policies() {
     setDecision(null);
     try {
       setDecision(await invoke<Decision>('evaluate_action_cmd', { actionJson }));
-    } catch (e) {
-      setEvalError(String(e));
+    } catch {
+      setEvalError(safeErrorMessage('оценить действие'));
     }
   };
 
