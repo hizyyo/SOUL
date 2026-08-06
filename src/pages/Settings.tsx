@@ -1,5 +1,4 @@
-import { useEffect, useState } from 'react';
-import { open, save } from '@tauri-apps/plugin-dialog';
+import { useCallback, useEffect, useState } from 'react';
 import {
   CLIENT_IDS,
   clientStateLabel,
@@ -13,6 +12,8 @@ import {
   type BridgeStatus,
 } from '../data/bridge';
 import { safeErrorMessage } from '../data/safeError';
+import { B1_PROFILE_STORAGE_KEY } from '../data/eval';
+import { Modal } from '../components/Modal';
 
 interface SoulInfo {
   soul_id: string;
@@ -66,6 +67,7 @@ interface ImportPreview {
   activated: boolean;
   head_event_hash: string | null;
   entity_counts: { entity_type: string; count: number }[];
+  partial_restore: boolean;
 }
 
 interface DeletionReceipt {
@@ -100,8 +102,8 @@ type ModalState =
   | { kind: 'none' }
   | { kind: 'export-passphrase' }
   | { kind: 'restore-privacy' }
-  | { kind: 'restore-passphrase'; filePath: string }
-  | { kind: 'restore-preview'; filePath: string; password: string; preview: ImportPreview }
+  | { kind: 'restore-passphrase' }
+  | { kind: 'restore-preview'; token: string; password: string; preview: ImportPreview }
   | { kind: 'restore-done'; soulId: string }
   | { kind: 'delete-confirm' }
   | { kind: 'delete-receipt'; receipt: DeletionReceipt };
@@ -125,14 +127,6 @@ async function invoke<T>(cmd: string, args?: Record<string, unknown>): Promise<T
   const internals = window.__TAURI_INTERNALS__;
   if (!internals) throw new Error('Not running in Tauri');
   return internals.invoke(cmd, args) as Promise<T>;
-}
-
-function ensureExtension(path: string, ext: string): string {
-  return path.toLowerCase().endsWith(ext) ? path : `${path}${ext}`;
-}
-
-function sanitizeFileName(name: string): string {
-  return name.replace(/[^a-zA-Z0-9-_ ]/g, '').trim() || 'soul';
 }
 
 export function Settings({ soul, entities, onDataChanged, onGoHome }: SettingsProps) {
@@ -249,26 +243,16 @@ export function Settings({ soul, entities, onDataChanged, onGoHome }: SettingsPr
     }
   };
 
-  const closeModal = () => setModal({ kind: 'none' });
+  const closeModal = useCallback(() => setModal({ kind: 'none' }), []);
 
   const handleExportBackup = async (password: string) => {
     if (!soul) return;
     setBusy('Exporting encrypted backup...');
     setError(null);
     try {
-      const path = await save({
-        title: 'Save SOUL backup',
-        defaultPath: `${sanitizeFileName(soul.display_name)}.soul`,
-        filters: [{ name: 'SOUL backup', extensions: ['soul'] }],
-      });
-      if (!path) {
-        closeModal();
-        return;
-      }
       const receipt = await invoke<ExportReceipt>('export_soul_cmd', {
         soulId: soul.soul_id,
         password,
-        path: ensureExtension(path, '.soul'),
       });
       setSuccess(
         `Backup saved (${receipt.entity_count} entities, ${receipt.event_count} events, ${formatSize(receipt.size_bytes)}). Hash: ${shortHash(receipt.content_hash)}`,
@@ -286,15 +270,8 @@ export function Settings({ soul, entities, onDataChanged, onGoHome }: SettingsPr
     setBusy('Exporting JSON...');
     setError(null);
     try {
-      const path = await save({
-        title: 'Export SOUL as JSON',
-        defaultPath: `${sanitizeFileName(soul.display_name)}-export.json`,
-        filters: [{ name: 'JSON', extensions: ['json'] }],
-      });
-      if (!path) return;
       const receipt = await invoke<FileReceipt>('export_soul_json_cmd', {
         soulId: soul.soul_id,
-        path: ensureExtension(path, '.json'),
       });
       setSuccess(`JSON export saved (${formatSize(receipt.size_bytes)}).`);
     } catch {
@@ -309,15 +286,8 @@ export function Settings({ soul, entities, onDataChanged, onGoHome }: SettingsPr
     setBusy('Exporting Markdown...');
     setError(null);
     try {
-      const path = await save({
-        title: 'Export SOUL as Markdown',
-        defaultPath: `${sanitizeFileName(soul.display_name)}-summary.md`,
-        filters: [{ name: 'Markdown', extensions: ['md'] }],
-      });
-      if (!path) return;
       const receipt = await invoke<FileReceipt>('export_soul_markdown_cmd', {
         soulId: soul.soul_id,
-        path: ensureExtension(path, '.md'),
       });
       setSuccess(`Markdown summary saved (${formatSize(receipt.size_bytes)}).`);
     } catch {
@@ -327,31 +297,22 @@ export function Settings({ soul, entities, onDataChanged, onGoHome }: SettingsPr
     }
   };
 
-  const handleRestoreStart = async () => {
-    setError(null);
-    try {
-      const filePath = await open({
-        title: 'Restore SOUL backup',
-        multiple: false,
-        directory: false,
-        filters: [{ name: 'SOUL backup', extensions: ['soul'] }],
-      });
-      if (!filePath) return;
-      setModal({ kind: 'restore-passphrase', filePath });
-    } catch {
-      setError(safeErrorMessage('выбрать резервную копию'));
-    }
-  };
-
-  const handleRestoreInspect = async (filePath: string, password: string) => {
+  const handleRestoreInspect = async (password: string) => {
     setBusy('Verifying backup...');
     setError(null);
     try {
-      const preview = await invoke<ImportPreview>('inspect_soul_file_cmd', {
-        path: filePath,
+      const selection = await invoke<{ token: string; preview: ImportPreview }>(
+        'inspect_soul_file_cmd',
+        {
+          password,
+        },
+      );
+      setModal({
+        kind: 'restore-preview',
+        token: selection.token,
         password,
+        preview: selection.preview,
       });
-      setModal({ kind: 'restore-preview', filePath, password, preview });
     } catch {
       setError(safeErrorMessage('проверить резервную копию'));
     } finally {
@@ -359,11 +320,11 @@ export function Settings({ soul, entities, onDataChanged, onGoHome }: SettingsPr
     }
   };
 
-  const handleRestoreApply = async (filePath: string, password: string) => {
+  const handleRestoreApply = async (token: string, password: string) => {
     setBusy('Restoring...');
     setError(null);
     try {
-      const restored = await invoke<SoulInfo>('import_soul_file_cmd', { path: filePath, password });
+      const restored = await invoke<SoulInfo>('import_soul_file_cmd', { token, password });
       setModal({ kind: 'restore-done', soulId: restored.soul_id });
       setSuccess('SOUL restored from backup.');
       await onDataChanged();
@@ -380,6 +341,7 @@ export function Settings({ soul, entities, onDataChanged, onGoHome }: SettingsPr
     setError(null);
     try {
       const receipt = await invoke<DeletionReceipt>('delete_soul_cmd', { soulId: soul.soul_id });
+      localStorage.removeItem(B1_PROFILE_STORAGE_KEY);
       setModal({ kind: 'delete-receipt', receipt });
       await onDataChanged();
     } catch {
@@ -400,18 +362,10 @@ export function Settings({ soul, entities, onDataChanged, onGoHome }: SettingsPr
 
       {error && (
         <div
+          role="alert"
           style={{
             ...errorStyle,
-            ...(modal.kind !== 'none'
-              ? {
-                  position: 'fixed',
-                  top: '16px',
-                  left: '50%',
-                  transform: 'translateX(-50%)',
-                  zIndex: 200,
-                  maxWidth: 'min(560px, 90vw)',
-                }
-              : {}),
+            ...(modal.kind !== 'none' ? { display: 'none' } : {}),
           }}
         >
           {error}
@@ -457,16 +411,21 @@ export function Settings({ soul, entities, onDataChanged, onGoHome }: SettingsPr
       <Section title="Backup">
         <p style={{ fontSize: '13px', color: '#666', margin: '0 0 8px' }}>
           Save an encrypted <code>.soul</code> backup. The file is protected with your passphrase
-          and signed by this device. Restoring works on any machine that knows the passphrase.
+          and signed by this installation. A save dialog opens after you enter the passphrase. The
+          backup includes entities, evaluations, policies, connectors and audit receipts. One-time
+          Gateway capabilities are deliberately revoked on restore.
         </p>
         <button
-          onClick={() => setModal({ kind: 'export-passphrase' })}
+          onClick={() => {
+            setError(null);
+            setModal({ kind: 'export-passphrase' });
+          }}
           disabled={!soul || busy !== null}
           style={primaryBtnStyle}
         >
           Save encrypted backup (.soul)
         </button>
-        <div style={{ display: 'flex', gap: '8px', marginTop: '8px' }}>
+        <div style={{ display: 'flex', flexWrap: 'wrap', gap: '8px', marginTop: '8px' }}>
           <button
             onClick={handleExportJson}
             disabled={!soul || busy !== null}
@@ -486,12 +445,15 @@ export function Settings({ soul, entities, onDataChanged, onGoHome }: SettingsPr
 
       <Section title="Restore">
         <p style={{ fontSize: '13px', color: '#666', margin: '0 0 8px' }}>
-          Import a <code>.soul</code> backup. The file is verified (signature, hash, schema) before
-          anything changes, and restoring replaces the current local data after you confirm a
-          preview.
+          Choose a <code>.soul</code> backup after entering its passphrase. SOUL verifies the
+          package signature, content hash, format and data before anything changes. Restoring
+          replaces the current database content only after you confirm the preview.
         </p>
         <button
-          onClick={() => setModal({ kind: 'restore-privacy' })}
+          onClick={() => {
+            setError(null);
+            setModal({ kind: 'restore-privacy' });
+          }}
           disabled={busy !== null}
           style={secondaryBtnStyle}
         >
@@ -591,7 +553,7 @@ export function Settings({ soul, entities, onDataChanged, onGoHome }: SettingsPr
           value={bridge ? bridgeStatusNote(bridge) : 'Нажмите «Проверить».'}
         />
         {bridge?.binary_path ? <StatusRow label="Binary" value={bridge.binary_path} mono /> : null}
-        <div style={{ display: 'flex', gap: '8px', marginTop: '8px' }}>
+        <div style={{ display: 'flex', flexWrap: 'wrap', gap: '8px', marginTop: '8px' }}>
           <button onClick={handleBridgeRegister} disabled={busy !== null} style={secondaryBtnStyle}>
             {bridge?.registered ? 'Re-register' : 'Register'}
           </button>
@@ -688,11 +650,15 @@ export function Settings({ soul, entities, onDataChanged, onGoHome }: SettingsPr
 
       <Section title="Danger zone" danger>
         <p style={{ fontSize: '13px', color: '#b91c1c', margin: '0 0 8px' }}>
-          Deletes the active SOUL, all entities, events, device keys and local database content. A
-          deletion receipt is written locally. Backups remain wherever you saved them.
+          Deletes every SOUL and all entities, events, calibration data, policies, gateway records
+          and blind-test rounds from the local database. The installation identity and database key
+          are retained, and a local deletion receipt is written. Saved backups are not deleted.
         </p>
         <button
-          onClick={() => setModal({ kind: 'delete-confirm' })}
+          onClick={() => {
+            setError(null);
+            setModal({ kind: 'delete-confirm' });
+          }}
           disabled={!soul || busy !== null}
           style={dangerBtnStyle}
         >
@@ -708,171 +674,191 @@ export function Settings({ soul, entities, onDataChanged, onGoHome }: SettingsPr
           confirmLabel="Export"
           busy={busy !== null}
           requireConfirmation
+          error={error}
           onSubmit={(password) => handleExportBackup(password)}
           onClose={closeModal}
         />
       )}
 
       {modal.kind === 'restore-privacy' && (
-        <div style={modalBackdropStyle}>
+        <Modal title="Перед восстановлением" onClose={closeModal}>
+          <p style={{ fontSize: '13px', color: '#4b5563', lineHeight: 1.5 }}>
+            Файл и пароль обрабатываются локально. Ничего не отправляется в сеть. Сначала SOUL
+            проверит подпись, hash и схему, затем покажет preview. Локальные данные заменяются
+            только после отдельного подтверждения.
+          </p>
           <div
-            style={modalCardStyle}
-            role="dialog"
-            aria-modal="true"
-            aria-labelledby="restore-privacy-title"
+            style={{ marginTop: '16px', display: 'flex', gap: '8px', justifyContent: 'flex-end' }}
           >
-            <h3 id="restore-privacy-title" style={{ margin: '0 0 8px' }}>
-              Перед восстановлением
-            </h3>
-            <p style={{ fontSize: '13px', color: '#4b5563', lineHeight: 1.5 }}>
-              Файл и пароль обрабатываются локально. Ничего не отправляется в сеть. Сначала SOUL
-              проверит подпись, hash и схему, затем покажет preview. Локальные данные заменяются
-              только после отдельного подтверждения.
-            </p>
-            <div
-              style={{ marginTop: '16px', display: 'flex', gap: '8px', justifyContent: 'flex-end' }}
+            <button onClick={closeModal} style={secondaryBtnStyle}>
+              Cancel
+            </button>
+            <button
+              onClick={() => {
+                closeModal();
+                setModal({ kind: 'restore-passphrase' });
+              }}
+              style={primaryBtnStyle}
             >
-              <button onClick={closeModal} style={secondaryBtnStyle}>
-                Cancel
-              </button>
-              <button
-                onClick={() => {
-                  closeModal();
-                  void handleRestoreStart();
-                }}
-                style={primaryBtnStyle}
-              >
-                Choose backup
-              </button>
-            </div>
+              Continue
+            </button>
           </div>
-        </div>
+        </Modal>
       )}
 
       {modal.kind === 'restore-passphrase' && (
         <PassphraseModal
           title="Enter backup passphrase"
-          confirmLabel="Verify"
+          confirmLabel="Choose and verify backup"
           busy={busy !== null}
-          onSubmit={(password) => handleRestoreInspect(modal.filePath, password)}
+          error={error}
+          onSubmit={handleRestoreInspect}
           onClose={closeModal}
         />
       )}
 
       {modal.kind === 'restore-preview' && (
-        <div style={modalBackdropStyle}>
-          <div style={modalCardStyle}>
-            <h3 style={{ margin: '0 0 12px' }}>Restore preview</h3>
+        <Modal
+          title="Restore preview"
+          onClose={closeModal}
+          closeOnBackdrop={false}
+          closeOnEscape={busy === null}
+          ariaDescribedBy={
+            error
+              ? 'restore-preview-description restore-preview-error'
+              : 'restore-preview-description'
+          }
+        >
+          <p
+            id="restore-preview-description"
+            style={{
+              fontSize: '13px',
+              color: '#b91c1c',
+              background: '#fef2f2',
+              padding: '8px 12px',
+              borderRadius: '6px',
+              border: '1px solid #fecaca',
+            }}
+          >
+            Restoring replaces the current local SOUL data.
+          </p>
+          {modal.preview.partial_restore && (
             <p
               style={{
                 fontSize: '13px',
-                color: '#b91c1c',
-                background: '#fef2f2',
+                color: '#92400e',
+                background: '#fffbeb',
                 padding: '8px 12px',
                 borderRadius: '6px',
-                border: '1px solid #fecaca',
+                border: '1px solid #fde68a',
               }}
             >
-              Restoring replaces the current local SOUL data.
+              This is a legacy core-only backup. Evaluations, policies, connector settings and
+              Gateway receipts were not included, so local demo defaults will be recreated.
             </p>
-            <div style={{ fontSize: '13px', lineHeight: 1.7 }}>
-              <PreviewRow label="Name" value={modal.preview.display_name} />
-              <PreviewRow label="Soul ID" value={modal.preview.soul_id} mono />
+          )}
+          {error && (
+            <p id="restore-preview-error" role="alert" style={modalErrorStyle}>
+              {error}
+            </p>
+          )}
+          <div style={{ fontSize: '13px', lineHeight: 1.7 }}>
+            <PreviewRow label="Name" value={modal.preview.display_name} />
+            <PreviewRow label="Soul ID" value={modal.preview.soul_id} mono />
+            <PreviewRow
+              label="Created"
+              value={new Date(modal.preview.created_at).toLocaleString()}
+            />
+            <PreviewRow label="Entities" value={String(modal.preview.entity_count)} />
+            <PreviewRow label="Events" value={String(modal.preview.event_count)} />
+            <PreviewRow label="Calibration step" value={String(modal.preview.calibration_step)} />
+            <PreviewRow label="Activated" value={modal.preview.activated ? 'yes' : 'no'} />
+            {modal.preview.head_event_hash && (
               <PreviewRow
-                label="Created"
-                value={new Date(modal.preview.created_at).toLocaleString()}
+                label="Head event hash"
+                value={shortHash(modal.preview.head_event_hash)}
+                mono
               />
-              <PreviewRow label="Entities" value={String(modal.preview.entity_count)} />
-              <PreviewRow label="Events" value={String(modal.preview.event_count)} />
-              <PreviewRow label="Calibration step" value={String(modal.preview.calibration_step)} />
-              <PreviewRow label="Activated" value={modal.preview.activated ? 'yes' : 'no'} />
-              {modal.preview.head_event_hash && (
-                <PreviewRow
-                  label="Head event hash"
-                  value={shortHash(modal.preview.head_event_hash)}
-                  mono
-                />
-              )}
-              {modal.preview.entity_counts.map((c) => (
-                <PreviewRow key={c.entity_type} label={c.entity_type} value={String(c.count)} />
-              ))}
-            </div>
-            <div
-              style={{ marginTop: '16px', display: 'flex', gap: '8px', justifyContent: 'flex-end' }}
-            >
-              <button onClick={closeModal} style={secondaryBtnStyle}>
-                Cancel
-              </button>
-              <button
-                onClick={() => handleRestoreApply(modal.filePath, modal.password)}
-                disabled={busy !== null}
-                style={primaryBtnStyle}
-              >
-                {busy ? 'Restoring...' : 'Confirm restore'}
-              </button>
-            </div>
+            )}
+            {modal.preview.entity_counts.map((c) => (
+              <PreviewRow key={c.entity_type} label={c.entity_type} value={String(c.count)} />
+            ))}
           </div>
-        </div>
+          <div
+            style={{ marginTop: '16px', display: 'flex', gap: '8px', justifyContent: 'flex-end' }}
+          >
+            <button onClick={closeModal} disabled={busy !== null} style={secondaryBtnStyle}>
+              Cancel
+            </button>
+            <button
+              onClick={() => handleRestoreApply(modal.token, modal.password)}
+              disabled={busy !== null}
+              style={primaryBtnStyle}
+            >
+              {busy ? 'Restoring...' : 'Confirm restore'}
+            </button>
+          </div>
+        </Modal>
       )}
 
       {modal.kind === 'restore-done' && (
-        <div style={modalBackdropStyle}>
-          <div style={modalCardStyle}>
-            <h3 style={{ margin: '0 0 8px' }}>Restore complete</h3>
-            <p style={{ fontSize: '13px', color: '#666' }}>
-              The backup has been restored. Your SOUL is ready.
-            </p>
-            <div style={{ marginTop: '16px', display: 'flex', justifyContent: 'flex-end' }}>
-              <button
-                onClick={() => {
-                  closeModal();
-                  onGoHome();
-                }}
-                style={primaryBtnStyle}
-              >
-                Go to Home
-              </button>
-            </div>
+        <Modal title="Restore complete" onClose={closeModal}>
+          <p style={{ fontSize: '13px', color: '#666' }}>
+            The backup has been restored. Your SOUL is ready.
+          </p>
+          <div style={{ marginTop: '16px', display: 'flex', justifyContent: 'flex-end' }}>
+            <button
+              onClick={() => {
+                closeModal();
+                onGoHome();
+              }}
+              style={primaryBtnStyle}
+            >
+              Go to Home
+            </button>
           </div>
-        </div>
+        </Modal>
       )}
 
       {modal.kind === 'delete-confirm' && (
-        <DeleteConfirmModal busy={busy !== null} onConfirm={handleDelete} onClose={closeModal} />
+        <DeleteConfirmModal
+          busy={busy !== null}
+          error={error}
+          onConfirm={handleDelete}
+          onClose={closeModal}
+        />
       )}
 
       {modal.kind === 'delete-receipt' && (
-        <div style={modalBackdropStyle}>
-          <div style={modalCardStyle}>
-            <h3 style={{ margin: '0 0 8px' }}>Data deleted</h3>
-            <p style={{ fontSize: '13px', color: '#666', margin: '0 0 12px' }}>
-              All local SOUL data was removed. This receipt is stored locally for your reference.
-            </p>
-            <div style={{ fontSize: '13px', lineHeight: 1.7 }}>
-              <PreviewRow
-                label="Deleted at"
-                value={new Date(modal.receipt.deleted_at).toLocaleString()}
-              />
-              <PreviewRow label="Entities removed" value={String(modal.receipt.entity_count)} />
-              <PreviewRow label="Events removed" value={String(modal.receipt.event_count)} />
-              <PreviewRow
-                label="Device keys removed"
-                value={modal.receipt.keys_deleted ? 'yes' : 'no'}
-              />
-            </div>
-            <div style={{ marginTop: '16px', display: 'flex', justifyContent: 'flex-end' }}>
-              <button
-                onClick={() => {
-                  closeModal();
-                  onGoHome();
-                }}
-                style={primaryBtnStyle}
-              >
-                Done
-              </button>
-            </div>
+        <Modal title="Data deleted" onClose={closeModal}>
+          <p style={{ fontSize: '13px', color: '#666', margin: '0 0 12px' }}>
+            The SOUL database content was removed. The installation identity, database key and this
+            deletion receipt remain locally.
+          </p>
+          <div style={{ fontSize: '13px', lineHeight: 1.7 }}>
+            <PreviewRow
+              label="Deleted at"
+              value={new Date(modal.receipt.deleted_at).toLocaleString()}
+            />
+            <PreviewRow label="Entities removed" value={String(modal.receipt.entity_count)} />
+            <PreviewRow label="Events removed" value={String(modal.receipt.event_count)} />
+            <PreviewRow
+              label="Installation keys removed"
+              value={modal.receipt.keys_deleted ? 'yes' : 'no'}
+            />
           </div>
-        </div>
+          <div style={{ marginTop: '16px', display: 'flex', justifyContent: 'flex-end' }}>
+            <button
+              onClick={() => {
+                closeModal();
+                onGoHome();
+              }}
+              style={primaryBtnStyle}
+            >
+              Done
+            </button>
+          </div>
+        </Modal>
       )}
     </div>
   );
@@ -908,6 +894,7 @@ function Section({
 function StatusRow({ label, value, mono }: { label: string; value: string; mono?: boolean }) {
   return (
     <div
+      className="status-row"
       style={{
         display: 'flex',
         justifyContent: 'space-between',
@@ -932,7 +919,10 @@ function StatusRow({ label, value, mono }: { label: string; value: string; mono?
 
 function PreviewRow({ label, value, mono }: { label: string; value: string; mono?: boolean }) {
   return (
-    <div style={{ display: 'flex', justifyContent: 'space-between', gap: '16px' }}>
+    <div
+      className="status-row"
+      style={{ display: 'flex', justifyContent: 'space-between', gap: '16px' }}
+    >
       <span style={{ color: '#888' }}>{label}</span>
       <span
         style={{
@@ -951,6 +941,7 @@ function PassphraseModal({
   title,
   confirmLabel,
   busy,
+  error,
   requireConfirmation,
   onSubmit,
   onClose,
@@ -958,6 +949,7 @@ function PassphraseModal({
   title: string;
   confirmLabel: string;
   busy: boolean;
+  error: string | null;
   requireConfirmation?: boolean;
   onSubmit: (password: string) => void;
   onClose: () => void;
@@ -980,47 +972,68 @@ function PassphraseModal({
   };
 
   return (
-    <div style={modalBackdropStyle}>
-      <div style={modalCardStyle}>
-        <h3 style={{ margin: '0 0 12px' }}>{title}</h3>
-        <input
-          type="password"
-          value={pass}
-          onChange={(e) => setPass(e.target.value)}
-          placeholder="Passphrase"
-          style={inputStyle}
-        />
-        {requireConfirmation && (
+    <Modal
+      title={title}
+      onClose={onClose}
+      closeOnBackdrop={!busy}
+      closeOnEscape={!busy}
+      {...(localError || error ? { ariaDescribedBy: 'passphrase-modal-error' } : {})}
+    >
+      <label htmlFor="modal-passphrase" style={fieldLabelStyle}>
+        Passphrase
+      </label>
+      <input
+        id="modal-passphrase"
+        type="password"
+        value={pass}
+        onChange={(e) => setPass(e.target.value)}
+        autoComplete={requireConfirmation ? 'new-password' : 'current-password'}
+        autoFocus
+        style={inputStyle}
+      />
+      {requireConfirmation && (
+        <>
+          <label
+            htmlFor="modal-passphrase-confirm"
+            style={{ ...fieldLabelStyle, marginTop: '8px' }}
+          >
+            Confirm passphrase
+          </label>
           <input
+            id="modal-passphrase-confirm"
             type="password"
             value={pass2}
             onChange={(e) => setPass2(e.target.value)}
-            placeholder="Confirm passphrase"
+            autoComplete="new-password"
             style={{ ...inputStyle, marginTop: '8px' }}
           />
-        )}
-        {localError && (
-          <p style={{ color: '#dc2626', fontSize: '12px', margin: '8px 0 0' }}>{localError}</p>
-        )}
-        <div style={{ marginTop: '16px', display: 'flex', gap: '8px', justifyContent: 'flex-end' }}>
-          <button onClick={onClose} disabled={busy} style={secondaryBtnStyle}>
-            Cancel
-          </button>
-          <button onClick={submit} disabled={busy} style={primaryBtnStyle}>
-            {busy ? 'Working...' : confirmLabel}
-          </button>
-        </div>
+        </>
+      )}
+      {(localError || error) && (
+        <p id="passphrase-modal-error" role="alert" style={modalErrorStyle}>
+          {localError ?? error}
+        </p>
+      )}
+      <div style={{ marginTop: '16px', display: 'flex', gap: '8px', justifyContent: 'flex-end' }}>
+        <button onClick={onClose} disabled={busy} style={secondaryBtnStyle}>
+          Cancel
+        </button>
+        <button onClick={submit} disabled={busy} style={primaryBtnStyle}>
+          {busy ? 'Working...' : confirmLabel}
+        </button>
       </div>
-    </div>
+    </Modal>
   );
 }
 
 function DeleteConfirmModal({
   busy,
+  error,
   onConfirm,
   onClose,
 }: {
   busy: boolean;
+  error: string | null;
   onConfirm: () => void;
   onClose: () => void;
 }) {
@@ -1037,33 +1050,52 @@ function DeleteConfirmModal({
   };
 
   return (
-    <div style={modalBackdropStyle}>
-      <div style={modalCardStyle}>
-        <h3 style={{ margin: '0 0 12px', color: '#b91c1c' }}>Delete all local data?</h3>
-        <p style={{ fontSize: '13px', color: '#666', margin: '0 0 12px' }}>
-          This permanently deletes your SOUL, entities, events, calibration and device keys on this
-          machine. This cannot be undone.
+    <Modal
+      title="Delete all local data?"
+      titleStyle={{ color: '#b91c1c' }}
+      onClose={onClose}
+      closeOnBackdrop={!busy}
+      closeOnEscape={!busy}
+      ariaDescribedBy={
+        localError || error
+          ? 'delete-modal-description delete-modal-error'
+          : 'delete-modal-description'
+      }
+    >
+      <p
+        id="delete-modal-description"
+        style={{ fontSize: '13px', color: '#666', margin: '0 0 12px' }}
+      >
+        This permanently deletes every SOUL and all entities, events, calibration data, policies,
+        gateway records and blind-test rounds in the local database. The installation identity and
+        database key remain, and a deletion receipt is written locally. This cannot be undone.
+      </p>
+      <label htmlFor="delete-confirmation" style={fieldLabelStyle}>
+        Type DELETE to confirm
+      </label>
+      <input
+        id="delete-confirmation"
+        type="text"
+        value={typed}
+        onChange={(e) => setTyped(e.target.value)}
+        autoComplete="off"
+        autoFocus
+        style={inputStyle}
+      />
+      {(localError || error) && (
+        <p id="delete-modal-error" role="alert" style={modalErrorStyle}>
+          {localError ?? error}
         </p>
-        <input
-          type="text"
-          value={typed}
-          onChange={(e) => setTyped(e.target.value)}
-          placeholder="Type DELETE"
-          style={inputStyle}
-        />
-        {localError && (
-          <p style={{ color: '#dc2626', fontSize: '12px', margin: '8px 0 0' }}>{localError}</p>
-        )}
-        <div style={{ marginTop: '16px', display: 'flex', gap: '8px', justifyContent: 'flex-end' }}>
-          <button onClick={onClose} disabled={busy} style={secondaryBtnStyle}>
-            Cancel
-          </button>
-          <button onClick={submit} disabled={busy} style={dangerBtnStyle}>
-            {busy ? 'Deleting...' : 'Delete everything'}
-          </button>
-        </div>
+      )}
+      <div style={{ marginTop: '16px', display: 'flex', gap: '8px', justifyContent: 'flex-end' }}>
+        <button onClick={onClose} disabled={busy} style={secondaryBtnStyle}>
+          Cancel
+        </button>
+        <button onClick={submit} disabled={busy} style={dangerBtnStyle}>
+          {busy ? 'Deleting...' : 'Delete everything'}
+        </button>
       </div>
-    </div>
+    </Modal>
   );
 }
 
@@ -1077,30 +1109,26 @@ function formatSize(bytes: number): string {
   return `${(bytes / (1024 * 1024)).toFixed(1)} MB`;
 }
 
-const modalBackdropStyle: React.CSSProperties = {
-  position: 'fixed',
-  inset: 0,
-  background: 'rgba(0,0,0,0.4)',
-  display: 'flex',
-  alignItems: 'center',
-  justifyContent: 'center',
-  zIndex: 100,
-};
-
-const modalCardStyle: React.CSSProperties = {
-  background: '#fff',
-  borderRadius: '12px',
-  padding: '20px',
-  width: 'min(480px, 90vw)',
-  boxShadow: '0 10px 40px rgba(0,0,0,0.2)',
-};
-
 const inputStyle: React.CSSProperties = {
   width: '100%',
   padding: '8px 12px',
   border: '1px solid #d1d5db',
   borderRadius: '6px',
   boxSizing: 'border-box',
+};
+
+const fieldLabelStyle: React.CSSProperties = {
+  display: 'block',
+  marginBottom: '4px',
+  color: '#374151',
+  fontSize: '13px',
+  fontWeight: 600,
+};
+
+const modalErrorStyle: React.CSSProperties = {
+  color: '#b91c1c',
+  fontSize: '12px',
+  margin: '8px 0 0',
 };
 
 const primaryBtnStyle: React.CSSProperties = {

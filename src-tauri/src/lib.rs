@@ -13,19 +13,34 @@ pub mod mcp;
 
 use db::{
     activate_preview, activate_soul, add_entity, confirm_soul_preview, create_soul,
-    get_calibration, get_soul, init_db, is_soul_activated, list_entities, list_souls,
-    reset_soul_preview, save_calibration, update_entity,
+    get_calibration, get_soul, init_db, is_soul_activated, list_entities, reset_soul_preview,
+    save_calibration, update_entity,
 };
 use package::{
     DeletionReceipt, ExportReceipt, ImportPreview, JsonExportReceipt, MarkdownExportReceipt,
     ReceiptSummary,
 };
 use serde::{Deserialize, Serialize};
+use std::collections::HashMap;
+use std::path::PathBuf;
 use std::sync::Mutex;
 use tauri::Manager;
+use tauri_plugin_dialog::DialogExt;
 
 struct AppState {
     conn: Mutex<rusqlite::Connection>,
+    import_selections: Mutex<HashMap<String, PendingImport>>,
+}
+
+struct PendingImport {
+    path: PathBuf,
+    content_hash: String,
+}
+
+#[derive(Debug, Serialize)]
+struct ImportSelection {
+    token: String,
+    preview: ImportPreview,
 }
 
 #[derive(Debug, Serialize, Deserialize, Clone)]
@@ -105,7 +120,7 @@ fn health() -> String {
 }
 
 #[tauri::command]
-fn init_app(app: tauri::AppHandle) -> Result<SoulInfo, String> {
+fn init_app(app: tauri::AppHandle) -> Result<Option<SoulInfo>, String> {
     let app_dir = app.path().app_data_dir().map_err(|e| e.to_string())?;
     std::fs::create_dir_all(&app_dir).map_err(|e| e.to_string())?;
 
@@ -113,12 +128,18 @@ fn init_app(app: tauri::AppHandle) -> Result<SoulInfo, String> {
     let state = app.state::<AppState>();
     *state.conn.lock().map_err(|e| e.to_string())? = conn;
 
-    let souls = list_souls_internal(&state).map_err(|e| e.to_string())?;
-    if let Some(s) = souls.first() {
+    let active_id = {
         let guard = state.conn.lock().map_err(|e| e.to_string())?;
-        Ok(soul_to_info(&guard, s))
+        db::active_soul_id(&guard)?
+    };
+    if let Some(active_id) = active_id {
+        let guard = state.conn.lock().map_err(|e| e.to_string())?;
+        let soul = get_soul(&guard, &active_id)
+            .map_err(|e| e.to_string())?
+            .ok_or("Active SOUL not found.".to_string())?;
+        Ok(Some(soul_to_info(&guard, &soul)))
     } else {
-        Err("No SOUL found. Create one first.".into())
+        Ok(None)
     }
 }
 
@@ -130,6 +151,7 @@ fn create_soul_cmd(
 ) -> Result<SoulInfo, String> {
     let conn = state.conn.lock().map_err(|e| e.to_string())?;
     let manifest = create_soul(&conn, &display_name, &device_id).map_err(|e| e.to_string())?;
+    db::set_active_soul(&conn, &manifest.soul_id)?;
     Ok(soul_to_info(&conn, &manifest))
 }
 
@@ -198,6 +220,12 @@ fn search_entities_cmd(
     query: String,
     limit: usize,
 ) -> Result<SearchResult, String> {
+    if query.chars().count() > db::MAX_SEARCH_QUERY_CHARS {
+        return Err(format!(
+            "Search query is too long (limit {} characters).",
+            db::MAX_SEARCH_QUERY_CHARS
+        ));
+    }
     let conn = state.conn.lock().map_err(|e| e.to_string())?;
     let (rows, truncated) =
         db::search_entities(&conn, &soul_id, &query, limit).map_err(|e| e.to_string())?;
@@ -285,64 +313,105 @@ fn activate_preview_cmd(
     Ok(soul_to_info(&conn, &s))
 }
 
-fn list_souls_internal(state: &AppState) -> Result<Vec<db::SoulManifest>, String> {
-    let conn = state.conn.lock().map_err(|e| e.to_string())?;
-    list_souls(&conn).map_err(|e| e.to_string())
-}
-
 #[tauri::command]
 fn export_soul_cmd(
     state: tauri::State<AppState>,
     app: tauri::AppHandle,
     soul_id: String,
     password: String,
-    path: String,
 ) -> Result<ExportReceipt, String> {
     let conn = state.conn.lock().map_err(|e| e.to_string())?;
     let app_dir = app.path().app_data_dir().map_err(|e| e.to_string())?;
-    package::export_package(
-        &conn,
-        &app_dir,
-        &soul_id,
-        &password,
-        std::path::Path::new(&path),
-    )
+    let path = app
+        .dialog()
+        .file()
+        .add_filter("SOUL backup", &["soul"])
+        .blocking_save_file()
+        .ok_or("Export cancelled.".to_string())?
+        .into_path()
+        .map_err(|e| e.to_string())?;
+    package::export_package(&conn, &app_dir, &soul_id, &password, &path)
 }
 
 #[tauri::command]
-fn inspect_soul_file_cmd(path: String, password: String) -> Result<ImportPreview, String> {
-    package::inspect_package_file(std::path::Path::new(&path), &password)
+fn inspect_soul_file_cmd(
+    state: tauri::State<AppState>,
+    app: tauri::AppHandle,
+    password: String,
+) -> Result<ImportSelection, String> {
+    let path = app
+        .dialog()
+        .file()
+        .add_filter("SOUL backup", &["soul"])
+        .blocking_pick_file()
+        .ok_or("Restore cancelled.".to_string())?
+        .into_path()
+        .map_err(|e| e.to_string())?;
+    let (preview, content_hash) =
+        package::inspect_package_file_with_content_hash(&path, &password)?;
+    let token = uuid::Uuid::new_v4().to_string();
+    let mut selections = state.import_selections.lock().map_err(|e| e.to_string())?;
+    selections.clear();
+    selections.insert(token.clone(), PendingImport { path, content_hash });
+    Ok(ImportSelection { token, preview })
 }
 
 #[tauri::command]
 fn import_soul_file_cmd(
     state: tauri::State<AppState>,
-    path: String,
+    token: String,
     password: String,
 ) -> Result<SoulInfo, String> {
+    let selection = state
+        .import_selections
+        .lock()
+        .map_err(|e| e.to_string())?
+        .remove(&token)
+        .ok_or("Restore selection expired; choose the backup again.".to_string())?;
     let mut conn = state.conn.lock().map_err(|e| e.to_string())?;
-    let manifest = package::import_package_file(&mut conn, std::path::Path::new(&path), &password)?;
+    let manifest = package::import_package_file_with_content_hash(
+        &mut conn,
+        &selection.path,
+        &password,
+        &selection.content_hash,
+    )?;
     Ok(soul_to_info(&conn, &manifest))
 }
 
 #[tauri::command]
 fn export_soul_json_cmd(
     state: tauri::State<AppState>,
+    app: tauri::AppHandle,
     soul_id: String,
-    path: String,
 ) -> Result<JsonExportReceipt, String> {
+    let path = app
+        .dialog()
+        .file()
+        .add_filter("JSON", &["json"])
+        .blocking_save_file()
+        .ok_or("Export cancelled.".to_string())?
+        .into_path()
+        .map_err(|e| e.to_string())?;
     let conn = state.conn.lock().map_err(|e| e.to_string())?;
-    package::export_json(&conn, &soul_id, std::path::Path::new(&path))
+    package::export_json(&conn, &soul_id, &path)
 }
 
 #[tauri::command]
 fn export_soul_markdown_cmd(
     state: tauri::State<AppState>,
+    app: tauri::AppHandle,
     soul_id: String,
-    path: String,
 ) -> Result<MarkdownExportReceipt, String> {
+    let path = app
+        .dialog()
+        .file()
+        .add_filter("Markdown", &["md", "markdown"])
+        .blocking_save_file()
+        .ok_or("Export cancelled.".to_string())?
+        .into_path()
+        .map_err(|e| e.to_string())?;
     let conn = state.conn.lock().map_err(|e| e.to_string())?;
-    package::export_markdown(&conn, &soul_id, std::path::Path::new(&path))
+    package::export_markdown(&conn, &soul_id, &path)
 }
 
 #[tauri::command]
@@ -365,6 +434,16 @@ fn delete_soul_cmd(
 ) -> Result<DeletionReceipt, String> {
     let conn = state.conn.lock().map_err(|e| e.to_string())?;
     let app_dir = app.path().app_data_dir().map_err(|e| e.to_string())?;
+    // Revoke authorization before deleting data. Any client config that cannot
+    // be edited safely still holds only the rotated, now-invalid capability.
+    crypto::rotate_local_capability_secret(&app_dir)?;
+    integrations::disconnect_all_after_capability_revocation(&app_dir);
+    let _ = native_host::unregister_bridge(&app_dir);
+    state
+        .import_selections
+        .lock()
+        .map_err(|e| e.to_string())?
+        .clear();
     package::wipe_local_data(&conn, &app_dir, &soul_id)
 }
 
@@ -631,6 +710,7 @@ pub fn run() {
                 rusqlite::Connection::open_in_memory()
                     .expect("Failed to open placeholder database"),
             ),
+            import_selections: Mutex::new(HashMap::new()),
         })
         .invoke_handler(tauri::generate_handler![
             health,

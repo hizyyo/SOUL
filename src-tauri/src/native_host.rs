@@ -5,7 +5,8 @@
 //!    с путём к `soul-bridge(.exe)` и `allowed_origins` ровно для одного
 //!    extension ID — браузер не даст подключиться другому расширению;
 //! 2. Windows: ключи реестра HKCU для Chrome и Edge (через `reg.exe` — без
-//!    новых крейтов); macOS/Linux: файл в каталогах NativeMessagingHosts.
+//!    новых крейтов). На других ОС регистрация явно возвращает unsupported,
+//!    пока платформенные пути установки не реализованы и не квалифицированы.
 //!
 //! Команды в UI (register/unregister/status) используют чистые функции
 //! `*_for(runner, ...)` — тесты подменяют runner и не трогают реальную систему.
@@ -21,6 +22,9 @@ pub const CHROME_REG_SUBKEY: &str = r"Software\Google\Chrome\NativeMessagingHost
 #[cfg(target_os = "windows")]
 pub const EDGE_REG_SUBKEY: &str = r"Software\Microsoft\Edge\NativeMessagingHosts";
 pub const HOST_MANIFEST_DIR_NAME: &str = "native-messaging";
+#[cfg(not(target_os = "windows"))]
+pub const UNSUPPORTED_NATIVE_HOST_MESSAGE: &str =
+    "Browser Companion native-host registration is currently supported on Windows only.";
 
 /// Выполнитель команд ОС. Прод — `reg.exe`; тесты подменяют фейком.
 pub type CommandRunner = dyn Fn(&[&str]) -> Result<Output, std::io::Error>;
@@ -149,10 +153,12 @@ pub fn register_bridge(app_dir: &Path) -> Result<BridgeStatus, String> {
     }
     #[cfg(not(target_os = "windows"))]
     {
-        register_bridge_for(app_dir, &noop_runner)
+        let _ = app_dir;
+        Err(UNSUPPORTED_NATIVE_HOST_MESSAGE.to_string())
     }
 }
 
+#[cfg(target_os = "windows")]
 pub fn register_bridge_for(app_dir: &Path, runner: &CommandRunner) -> Result<BridgeStatus, String> {
     let manifest_path = host_manifest_path(app_dir);
     std::fs::create_dir_all(manifest_path.parent().unwrap())
@@ -165,14 +171,19 @@ pub fn register_bridge_for(app_dir: &Path, runner: &CommandRunner) -> Result<Bri
     std::fs::rename(&tmp, &manifest_path)
         .map_err(|e| format!("Cannot write host manifest: {e}"))?;
 
-    #[cfg(target_os = "windows")]
-    {
-        let path_str = manifest_path.to_string_lossy().to_string();
-        register_registry_key(runner, CHROME_REG_SUBKEY, &path_str)?;
-        register_registry_key(runner, EDGE_REG_SUBKEY, &path_str)?;
-    }
+    let path_str = manifest_path.to_string_lossy().to_string();
+    register_registry_key(runner, CHROME_REG_SUBKEY, &path_str)?;
+    register_registry_key(runner, EDGE_REG_SUBKEY, &path_str)?;
 
     Ok(bridge_status_for(app_dir, runner))
+}
+
+#[cfg(not(target_os = "windows"))]
+pub fn register_bridge_for(
+    _app_dir: &Path,
+    _runner: &CommandRunner,
+) -> Result<BridgeStatus, String> {
+    Err(UNSUPPORTED_NATIVE_HOST_MESSAGE.to_string())
 }
 
 /// Удаляет регистрацию: ключи реестра и манифест. Отсутствующие ключи не
@@ -184,25 +195,32 @@ pub fn unregister_bridge(app_dir: &Path) -> Result<BridgeStatus, String> {
     }
     #[cfg(not(target_os = "windows"))]
     {
-        unregister_bridge_for(app_dir, &noop_runner)
+        let _ = app_dir;
+        Err(UNSUPPORTED_NATIVE_HOST_MESSAGE.to_string())
     }
 }
 
+#[cfg(target_os = "windows")]
 pub fn unregister_bridge_for(
     app_dir: &Path,
     runner: &CommandRunner,
 ) -> Result<BridgeStatus, String> {
-    #[cfg(target_os = "windows")]
-    {
-        let _ = unregister_registry_key(runner, CHROME_REG_SUBKEY);
-        let _ = unregister_registry_key(runner, EDGE_REG_SUBKEY);
-    }
+    let _ = unregister_registry_key(runner, CHROME_REG_SUBKEY);
+    let _ = unregister_registry_key(runner, EDGE_REG_SUBKEY);
     let manifest_path = host_manifest_path(app_dir);
     if manifest_path.exists() {
         std::fs::remove_file(&manifest_path)
             .map_err(|e| format!("Cannot remove host manifest: {e}"))?;
     }
     Ok(bridge_status_for(app_dir, runner))
+}
+
+#[cfg(not(target_os = "windows"))]
+pub fn unregister_bridge_for(
+    _app_dir: &Path,
+    _runner: &CommandRunner,
+) -> Result<BridgeStatus, String> {
+    Err(UNSUPPORTED_NATIVE_HOST_MESSAGE.to_string())
 }
 
 /// Текущее состояние регистрации.
@@ -241,7 +259,9 @@ pub fn bridge_status_for(app_dir: &Path, runner: &CommandRunner) -> BridgeStatus
     }
     #[cfg(not(target_os = "windows"))]
     {
-        status.registered = status.manifest_exists;
+        let _ = runner;
+        status.registered = false;
+        status.error = UNSUPPORTED_NATIVE_HOST_MESSAGE.to_string();
     }
     status
 }
@@ -315,6 +335,7 @@ mod tests {
         }
     }
 
+    #[cfg(target_os = "windows")]
     fn manifest_of(env: &TestEnv) -> serde_json::Value {
         let path = host_manifest_path(&env.dir);
         serde_json::from_str(&std::fs::read_to_string(path).unwrap()).unwrap()
@@ -339,6 +360,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg(target_os = "windows")]
     fn register_writes_manifest_and_registry_keys() {
         let env = TestEnv::new();
         let runner = FakeRunner::new();
@@ -350,51 +372,43 @@ mod tests {
         assert_eq!(manifest["name"], bridge::BRIDGE_HOST_NAME);
         assert!(manifest["path"].as_str().unwrap().contains("soul-bridge"));
 
-        #[cfg(target_os = "windows")]
-        {
-            let calls = runner.calls();
-            let adds: Vec<&Vec<String>> = calls.iter().filter(|c| c[0] == "add").collect();
-            assert_eq!(adds.len(), 2, "chrome + edge keys");
-            assert!(adds
-                .iter()
-                .any(|c| c[1].contains("Google\\Chrome\\NativeMessagingHosts")));
-            assert!(adds
-                .iter()
-                .any(|c| c[1].contains("Microsoft\\Edge\\NativeMessagingHosts")));
-            for call in &adds {
-                assert_eq!(call[2], "/ve");
-                assert_eq!(call[5], "/f");
-                assert!(call[4].ends_with("com.soul.browser_companion.json"));
-            }
-        }
-        #[cfg(not(target_os = "windows"))]
-        {
-            assert_eq!(runner.calls().len(), 0);
+        let calls = runner.calls();
+        let adds: Vec<&Vec<String>> = calls.iter().filter(|c| c[0] == "add").collect();
+        assert_eq!(adds.len(), 2, "chrome + edge keys");
+        assert!(adds
+            .iter()
+            .any(|c| c[1].contains("Google\\Chrome\\NativeMessagingHosts")));
+        assert!(adds
+            .iter()
+            .any(|c| c[1].contains("Microsoft\\Edge\\NativeMessagingHosts")));
+        for call in &adds {
+            assert_eq!(call[2], "/ve");
+            assert_eq!(call[5], "/f");
+            assert!(call[4].ends_with("com.soul.browser_companion.json"));
         }
     }
 
     #[test]
+    #[cfg(target_os = "windows")]
     fn unregister_removes_manifest_and_keys_idempotently() {
         let env = TestEnv::new();
         let runner = FakeRunner::new();
         let _ = register_bridge_for(&env.dir, &runner.command()).unwrap();
         let status = unregister_bridge_for(&env.dir, &runner.command()).unwrap();
         assert!(!status.manifest_exists);
-        #[cfg(target_os = "windows")]
-        {
-            let deletes: Vec<Vec<String>> = runner
-                .calls()
-                .into_iter()
-                .filter(|c| c[0] == "delete")
-                .collect();
-            assert_eq!(deletes.len(), 2);
-        }
+        let deletes: Vec<Vec<String>> = runner
+            .calls()
+            .into_iter()
+            .filter(|c| c[0] == "delete")
+            .collect();
+        assert_eq!(deletes.len(), 2);
         // Второй раз — тоже успех (idempotent).
         let status = unregister_bridge_for(&env.dir, &runner.command()).unwrap();
         assert!(!status.manifest_exists);
     }
 
     #[test]
+    #[cfg(target_os = "windows")]
     fn status_reflects_manifest_and_registry() {
         let env = TestEnv::new();
         // reg query отвечает "ключа нет" → не зарегистрировано.
@@ -416,32 +430,49 @@ mod tests {
     }
 
     #[test]
+    #[cfg(target_os = "windows")]
     fn status_flags_orphan_manifest_when_registry_missing() {
-        #[cfg(target_os = "windows")]
-        {
-            let env = TestEnv::new();
-            let runner = FakeRunner::new();
-            let _ = register_bridge_for(&env.dir, &runner.command()).unwrap();
-            // Теперь reg query отвечает "ключа нет".
-            let runner2 = FakeRunner {
-                calls: Arc::new(Mutex::new(Vec::new())),
-                fail_contains: Some("NativeMessagingHosts".to_string()),
-            };
-            let status = bridge_status_for(&env.dir, &runner2.command());
-            assert!(!status.registered);
-            assert!(status.manifest_exists);
-            assert!(status.error.contains("Manifest exists"));
-        }
-        #[cfg(not(target_os = "windows"))]
-        {
-            let env = TestEnv::new();
-            let runner = FakeRunner::new();
-            let _ = register_bridge_for(&env.dir, &runner.command()).unwrap();
-            let status = bridge_status_for(&env.dir, &runner.command());
-            assert!(status.registered);
-            assert!(status.manifest_exists);
-            assert_eq!(status.error, "");
-        }
+        let env = TestEnv::new();
+        let runner = FakeRunner::new();
+        let _ = register_bridge_for(&env.dir, &runner.command()).unwrap();
+        // Теперь reg query отвечает "ключа нет".
+        let runner2 = FakeRunner {
+            calls: Arc::new(Mutex::new(Vec::new())),
+            fail_contains: Some("NativeMessagingHosts".to_string()),
+        };
+        let status = bridge_status_for(&env.dir, &runner2.command());
+        assert!(!status.registered);
+        assert!(status.manifest_exists);
+        assert!(status.error.contains("Manifest exists"));
+    }
+
+    #[test]
+    #[cfg(not(target_os = "windows"))]
+    fn non_windows_registration_reports_unsupported_without_writing_manifest() {
+        let env = TestEnv::new();
+        let runner = FakeRunner::new();
+        let error = register_bridge_for(&env.dir, &runner.command()).unwrap_err();
+        assert_eq!(error, UNSUPPORTED_NATIVE_HOST_MESSAGE);
+        assert!(!host_manifest_path(&env.dir).exists());
+        assert!(runner.calls().is_empty());
+    }
+
+    #[test]
+    #[cfg(not(target_os = "windows"))]
+    fn non_windows_unregister_and_status_report_unsupported() {
+        let env = TestEnv::new();
+        let runner = FakeRunner::new();
+        let error = unregister_bridge_for(&env.dir, &runner.command()).unwrap_err();
+        assert_eq!(error, UNSUPPORTED_NATIVE_HOST_MESSAGE);
+
+        let manifest_path = host_manifest_path(&env.dir);
+        std::fs::create_dir_all(manifest_path.parent().unwrap()).unwrap();
+        std::fs::write(&manifest_path, "{}").unwrap();
+        let status = bridge_status_for(&env.dir, &runner.command());
+        assert!(!status.registered);
+        assert!(status.manifest_exists);
+        assert_eq!(status.error, UNSUPPORTED_NATIVE_HOST_MESSAGE);
+        assert!(runner.calls().is_empty());
     }
 
     #[test]

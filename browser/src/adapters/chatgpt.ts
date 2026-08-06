@@ -2,7 +2,8 @@
  * Адаптер ChatGPT Web (chatgpt.com), разметка v1.
  */
 
-import type { AdapterEvent, HealthReport, Page, SiteAdapter } from './types';
+import { probeAdapter } from './probe';
+import type { AdapterEvent, SiteAdapter } from './types';
 
 export const chatgptAdapter: SiteAdapter = {
   id: 'chatgpt',
@@ -14,28 +15,12 @@ export const chatgptAdapter: SiteAdapter = {
   inputSelector: '#prompt-textarea',
   sendSelector: 'button[data-testid="send-button"]',
   mountSelector: 'form[data-type="unified-composer"]',
-  historySelector: '[data-message-author-role]',
+  historySelector: 'main',
+  userMessageSelector: '[data-message-author-role="user"]',
   inputKind: 'textarea',
 
-  probe(page: Page): HealthReport {
-    const required = page.querySelector('#prompt-textarea');
-    const send = page.querySelector('button[data-testid="send-button"]');
-    const mount = page.querySelector('form[data-type="unified-composer"]');
-    const missing = [
-      ...(required ? [] : ['#prompt-textarea']),
-      ...(send ? [] : ['button[data-testid="send-button"]']),
-      ...(mount ? [] : ['form[data-type="unified-composer"]']),
-    ];
-    return {
-      status: missing.length === 0 ? 'ok' : 'failed',
-      missing,
-      checked: [
-        '#prompt-textarea',
-        'button[data-testid="send-button"]',
-        'form[data-type="unified-composer"]',
-      ],
-      at: Date.now(),
-    };
+  probe(page) {
+    return probeAdapter(this, page, { inputTag: 'TEXTAREA', mountTag: 'FORM' });
   },
 
   isSendEvent(event: AdapterEvent): boolean {

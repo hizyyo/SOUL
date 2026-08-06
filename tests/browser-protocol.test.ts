@@ -1,9 +1,17 @@
 import { describe, it, expect } from 'vitest';
 import {
+  isTrustedSenderForRequest,
   isContextResponse,
+  validateNativeResponse,
   validateOutgoingRequest,
 } from '../browser/src/protocol';
-import { PROTOCOL_VERSION, EXTENSION_ID, MAX_TASK_CHARS } from '../browser/src/constants';
+import {
+  CONTEXT_POLICY_VERSION,
+  EXTENSION_ID,
+  MAX_PACK_CHARS,
+  MAX_TASK_CHARS,
+  PROTOCOL_VERSION,
+} from '../browser/src/constants';
 
 const base = {
   protocol: PROTOCOL_VERSION,
@@ -13,10 +21,14 @@ const base = {
 
 const validContext = {
   type: 'soul.context',
+  protocol: PROTOCOL_VERSION,
+  nonce: base.nonce,
+  ok: true,
   pack: '{"claims":[]}',
   entityCount: 3,
   tokenEstimate: 420,
-  policyVersion: '7f3a9c2e',
+  costEstimateUsd: 0.0021,
+  policyVersion: CONTEXT_POLICY_VERSION,
   stateVersion: '5b38f537',
   maxTokens: 900,
 };
@@ -40,6 +52,65 @@ describe('isContextResponse', () => {
     expect(isContextResponse(noPack)).toBe(false);
     expect(isContextResponse({ ...validContext, entityCount: '3' })).toBe(false);
     expect(isContextResponse(null)).toBe(false);
+  });
+
+  it('привязывает ответ к nonce и проверяет границы pack/token budget', () => {
+    expect(isContextResponse(validContext, base.nonce)).toBe(true);
+    expect(isContextResponse(validContext, 'x'.repeat(20))).toBe(false);
+    expect(isContextResponse({ ...validContext, pack: '' })).toBe(false);
+    expect(isContextResponse({ ...validContext, pack: 'x'.repeat(MAX_PACK_CHARS + 1) })).toBe(false);
+    expect(isContextResponse({ ...validContext, tokenEstimate: 901 })).toBe(false);
+    expect(isContextResponse({ ...validContext, maxTokens: 3001 })).toBe(false);
+    expect(isContextResponse({ ...validContext, unexpected: true })).toBe(false);
+  });
+
+  it('strictly validates native success and error responses', () => {
+    expect(validateNativeResponse(validContext, base.nonce)).toEqual(validContext);
+    expect(
+      validateNativeResponse(
+        {
+          type: 'soul.error',
+          protocol: PROTOCOL_VERSION,
+          nonce: base.nonce,
+          ok: false,
+          code: 'runtime_error',
+          message: 'failed',
+        },
+        base.nonce,
+      ),
+    ).not.toBeNull();
+    expect(validateNativeResponse({ ...validContext, ok: false }, base.nonce)).toBeNull();
+  });
+});
+
+describe('sender origin binding', () => {
+  const contextRequest = {
+    type: 'soul.get_context' as const,
+    ...base,
+    origin: 'https://chatgpt.com',
+    task: 'question',
+    maxTokens: 900,
+  };
+
+  it('requires the sender URL origin to match a context request', () => {
+    expect(
+      isTrustedSenderForRequest(
+        { id: EXTENSION_ID, url: 'https://chatgpt.com/c/123' },
+        contextRequest,
+      ),
+    ).toBe(true);
+    expect(
+      isTrustedSenderForRequest(
+        { id: EXTENSION_ID, url: 'https://claude.ai/chat/123' },
+        contextRequest,
+      ),
+    ).toBe(false);
+    expect(
+      isTrustedSenderForRequest(
+        { id: EXTENSION_ID, url: 'chrome-extension://extension/page.html' },
+        contextRequest,
+      ),
+    ).toBe(false);
   });
 });
 

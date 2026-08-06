@@ -1,4 +1,4 @@
-import { useState, useEffect } from 'react';
+import { useState, useEffect, useRef } from 'react';
 import { Nav, type Tab } from './components/Nav';
 import { Home } from './pages/Home';
 import { Calibration } from './pages/Calibration';
@@ -12,6 +12,10 @@ import { Demo } from './pages/Demo';
 import { CALIBRATION_STEPS, TOTAL_STEPS, type CalibrationAnswer } from './data/calibration';
 import { compileAnswers } from './data/compile';
 import { safeErrorMessage } from './data/safeError';
+import { B1_PROFILE_STORAGE_KEY } from './data/eval';
+import { resolveDeviceId } from './data/identity';
+import { createLatestRequestGate } from './data/mutations';
+import { useGlobalMutation } from './data/useMutation';
 
 interface SoulInfo {
   soul_id: string;
@@ -60,14 +64,6 @@ async function invoke<T>(cmd: string, args?: Record<string, unknown>): Promise<T
   return internals.invoke(cmd, args) as Promise<T>;
 }
 
-function getDeviceId(): string {
-  const stored = localStorage.getItem('soul_device_id');
-  if (stored) return stored;
-  const id = `device_${Math.random().toString(36).slice(2, 10)}`;
-  localStorage.setItem('soul_device_id', id);
-  return id;
-}
-
 function parseCalibrationAnswers(raw: string): CalibrationAnswer[] {
   try {
     const parsed: unknown = JSON.parse(raw);
@@ -98,12 +94,18 @@ export function App() {
   const [tauriAvailable, setTauriAvailable] = useState(false);
   const [showCalibration, setShowCalibration] = useState(false);
   const [calAnswers, setCalAnswers] = useState<CalibrationAnswer[]>([]);
-  const [busyEntityId, setBusyEntityId] = useState<string | null>(null);
+  const [busyEntityIds, setBusyEntityIds] = useState<ReadonlySet<string>>(new Set());
   const [lastReview, setLastReview] = useState<LastReview | null>(null);
   const [connectedClients, setConnectedClients] = useState(0);
   const [startupFailed, setStartupFailed] = useState(false);
+  const calibrationCompleteRef = useRef(false);
+  const panelFocusReadyRef = useRef(false);
+  const deviceIdRef = useRef<string | null>(demoOnly ? 'demo-device' : null);
+  const entityRefreshGateRef = useRef(createLatestRequestGate());
+  const { activeKey: activeMutation, run: runMutation } = useGlobalMutation();
+  const effectiveTab = tab === 'preview' && (!soul || soul.activated) ? 'home' : tab;
 
-  const deviceId = demoOnly ? 'demo-device' : getDeviceId();
+  const deviceId = (): string => deviceIdRef.current ?? soul?.device_id ?? '';
 
   const loadConnectedClients = async () => {
     try {
@@ -116,7 +118,15 @@ export function App() {
 
   const loadData = async () => {
     try {
-      const s = await invoke<SoulInfo>('init_app');
+      const s = await invoke<SoulInfo | null>('init_app');
+      if (!s) {
+        setSoul(null);
+        setEntities([]);
+        setCalAnswers([]);
+        setStartupFailed(false);
+        localStorage.removeItem(B1_PROFILE_STORAGE_KEY);
+        return null;
+      }
       setSoul(s);
       let ents = await invoke<EntityInfo[]>('list_entities_cmd', { soulId: s.soul_id });
       const cal = await invoke<{ step: number; answers: string }>('get_calibration_cmd', {
@@ -153,7 +163,15 @@ export function App() {
     const avail = isTauri();
     setTauriAvailable(avail);
     if (avail) {
-      loadData()
+      try {
+        deviceIdRef.current = resolveDeviceId(localStorage);
+      } catch {
+        setStartupFailed(true);
+        setError(safeErrorMessage('получить идентификатор установки'));
+        setLoading(false);
+        return;
+      }
+      void loadData()
         .then(() => loadConnectedClients())
         .finally(() => setLoading(false));
     } else {
@@ -165,27 +183,62 @@ export function App() {
   useEffect(() => {
     if (demoOnly) return;
     void loadConnectedClients();
-  }, [demoOnly, tab]);
+  }, [demoOnly, effectiveTab]);
+
+  useEffect(() => {
+    if (!panelFocusReadyRef.current) {
+      panelFocusReadyRef.current = true;
+      return;
+    }
+    document.getElementById('main-panel')?.focus();
+  }, [effectiveTab, showCalibration]);
 
   const refreshEntities = async (soulId: string) => {
+    const request = entityRefreshGateRef.current.begin();
     const ents = await invoke<EntityInfo[]>('list_entities_cmd', { soulId });
-    setEntities(ents);
+    if (request.isCurrent()) setEntities(ents);
     return ents;
+  };
+
+  const setEntityPending = (id: string, pending: boolean) => {
+    setBusyEntityIds((current) => {
+      const next = new Set(current);
+      if (pending) next.add(id);
+      else next.delete(id);
+      return next;
+    });
+  };
+
+  const runEntityMutation = async (
+    id: string,
+    action: () => Promise<boolean>,
+  ): Promise<boolean> => {
+    const result = await runMutation(`entity:${id}`, async () => {
+      setEntityPending(id, true);
+      try {
+        return await action();
+      } finally {
+        setEntityPending(id, false);
+      }
+    });
+    return result.started ? result.value : false;
   };
 
   const handleCreate = async () => {
     if (!displayName.trim()) return;
-    setError(null);
-    try {
-      const s = await invoke<SoulInfo>('create_soul_cmd', {
-        displayName: displayName.trim(),
-        deviceId,
-      });
-      setSoul(s);
-      setEntities([]);
-    } catch {
-      setError(safeErrorMessage('создать SOUL'));
-    }
+    await runMutation('soul:create', async () => {
+      setError(null);
+      try {
+        const s = await invoke<SoulInfo>('create_soul_cmd', {
+          displayName: displayName.trim(),
+          deviceId: deviceId(),
+        });
+        setSoul(s);
+        setEntities([]);
+      } catch {
+        setError(safeErrorMessage('создать SOUL'));
+      }
+    });
   };
 
   const handleStartCalibration = async () => {
@@ -195,17 +248,20 @@ export function App() {
 
   const handleSaveCalibration = async (step: number, answers: CalibrationAnswer[]) => {
     if (!soul) return;
-    setCalAnswers(answers);
-    try {
-      await invoke('save_calibration_cmd', {
-        soulId: soul.soul_id,
-        step,
-        answers: JSON.stringify(answers),
-      });
-    } catch (e) {
-      setError(safeErrorMessage('сохранить калибровку'));
-      throw e;
-    }
+    const result = await runMutation('calibration:save', async () => {
+      try {
+        await invoke('save_calibration_cmd', {
+          soulId: soul.soul_id,
+          step,
+          answers: JSON.stringify(answers),
+        });
+        setCalAnswers(answers);
+      } catch (e) {
+        setError(safeErrorMessage('сохранить калибровку'));
+        throw e;
+      }
+    });
+    if (!result.started) throw new Error('Another mutation is already running.');
   };
 
   const createEntitiesFromAnswers = async (
@@ -223,104 +279,128 @@ export function App() {
           entityType: item.type,
           status: 'candidate',
           data: JSON.stringify(item.data),
-          deviceId,
+          deviceId: deviceId(),
         });
         created.push(ent);
-      } catch (e) {
-        errors.push(`${item.questionId}: ${String(e)}`);
+      } catch {
+        errors.push(item.questionId);
       }
     }
     if (errors.length > 0) {
-      setError(`Some entities were not created: ${errors.join('; ')}`);
+      setError(
+        `Some calibration items could not be created (${errors.length}). Your answers remain saved; retry from Home.`,
+      );
     }
     return created;
   };
 
   const handleCalibrationComplete = async (answers: CalibrationAnswer[]) => {
-    if (!soul) return;
-    setShowCalibration(false);
-    setError(null);
-
-    await createEntitiesFromAnswers(soul.soul_id, answers);
-
+    if (!soul || calibrationCompleteRef.current) return;
+    calibrationCompleteRef.current = true;
     try {
-      const s = await invoke<SoulInfo>('get_soul_cmd', { soulId: soul.soul_id });
-      if (s) setSoul(s);
-      await refreshEntities(soul.soul_id);
-    } catch {
-      setError(safeErrorMessage('завершить калибровку'));
+      const result = await runMutation('calibration:complete', async () => {
+        setError(null);
+        try {
+          await createEntitiesFromAnswers(soul.soul_id, answers);
+          const [s] = await Promise.all([
+            invoke<SoulInfo>('get_soul_cmd', { soulId: soul.soul_id }),
+            refreshEntities(soul.soul_id),
+          ]);
+          if (s) setSoul(s);
+          setShowCalibration(false);
+          setTab('preview');
+        } catch (e) {
+          setError(safeErrorMessage('завершить калибровку'));
+          throw e;
+        }
+      });
+      if (!result.started) throw new Error('Another mutation is already running.');
+    } finally {
+      calibrationCompleteRef.current = false;
     }
-    setTab('preview');
   };
 
   const handleConfirmPreview = async () => {
     if (!soul) return;
-    setError(null);
-    try {
-      const s = await invoke<SoulInfo>('confirm_preview_cmd', {
-        soulId: soul.soul_id,
-        deviceId,
-      });
-      setSoul(s);
-    } catch {
-      setError(safeErrorMessage('подтвердить preview'));
-    }
+    await runMutation('preview:confirm', async () => {
+      setError(null);
+      try {
+        const s = await invoke<SoulInfo>('confirm_preview_cmd', {
+          soulId: soul.soul_id,
+          deviceId: deviceId(),
+        });
+        setSoul(s);
+      } catch {
+        setError(safeErrorMessage('подтвердить preview'));
+      }
+    });
   };
 
   const handleResetPreview = async () => {
     if (!soul) return;
-    setError(null);
-    try {
-      const s = await invoke<SoulInfo>('reset_preview_cmd', {
-        soulId: soul.soul_id,
-        deviceId,
-      });
-      setSoul(s);
-    } catch {
-      setError(safeErrorMessage('сбросить preview'));
-    }
+    await runMutation('preview:reset', async () => {
+      setError(null);
+      try {
+        const s = await invoke<SoulInfo>('reset_preview_cmd', {
+          soulId: soul.soul_id,
+          deviceId: deviceId(),
+        });
+        setSoul(s);
+      } catch {
+        setError(safeErrorMessage('сбросить preview'));
+      }
+    });
   };
 
   const handleActivatePreview = async (entityIds: string[]) => {
     if (!soul) return;
-    setError(null);
-    try {
-      const s = await invoke<SoulInfo>('activate_preview_cmd', {
-        soulId: soul.soul_id,
-        entityIds,
-        deviceId,
-      });
-      setSoul(s);
-      await refreshEntities(soul.soul_id);
-      setTab('home');
-    } catch {
-      setError(safeErrorMessage('активировать SOUL'));
-    }
+    await runMutation('preview:activate', async () => {
+      setError(null);
+      try {
+        const s = await invoke<SoulInfo>('activate_preview_cmd', {
+          soulId: soul.soul_id,
+          entityIds,
+          deviceId: deviceId(),
+        });
+        await refreshEntities(soul.soul_id);
+        setSoul(s);
+        setTab('home');
+      } catch {
+        setError(safeErrorMessage('активировать SOUL'));
+      }
+    });
   };
 
   const runStatusUpdate = async (id: string, status: string): Promise<boolean> => {
-    setBusyEntityId(id);
-    setError(null);
-    try {
-      await invoke('update_entity_cmd', {
-        soulId: soul?.soul_id ?? '',
-        entityId: id,
-        status,
-        deviceId,
-      });
-      if (soul) await refreshEntities(soul.soul_id);
-      return true;
-    } catch {
-      setError(safeErrorMessage('обновить запись'));
-      return false;
-    } finally {
-      setBusyEntityId(null);
-    }
+    return runEntityMutation(id, async () => {
+      setError(null);
+      try {
+        const updated = await invoke<EntityInfo>('update_entity_cmd', {
+          soulId: soul?.soul_id ?? '',
+          entityId: id,
+          status,
+          deviceId: deviceId(),
+        });
+        setEntities((current) => current.map((entity) => (entity.id === id ? updated : entity)));
+        if (soul) {
+          try {
+            await refreshEntities(soul.soul_id);
+          } catch {
+            setError('The entity was updated, but the full entity list could not be refreshed.');
+          }
+        }
+        return true;
+      } catch {
+        setError(safeErrorMessage('обновить запись'));
+        return false;
+      }
+    });
   };
 
   const handleConfirmEntity = async (id: string) => {
     const ok = await runStatusUpdate(id, 'active');
     if (ok) setLastReview({ entityId: id, action: 'confirmed' });
+    return ok;
   };
 
   const handleRejectEntity = async (id: string) => {
@@ -335,35 +415,40 @@ export function App() {
 
   const handleEditEntity = async (id: string, claim: string) => {
     if (!soul) return;
-    setBusyEntityId(id);
-    setError(null);
-    try {
-      const ents = await refreshEntities(soul.soul_id);
-      const target = ents.find((e) => e.id === id);
-      if (!target) return;
-      let data: Record<string, unknown> = {};
+    await runEntityMutation(id, async () => {
+      setError(null);
       try {
-        const parsed: unknown = JSON.parse(target.data);
-        if (parsed && typeof parsed === 'object' && !Array.isArray(parsed)) {
-          data = parsed as Record<string, unknown>;
+        const target = entities.find((e) => e.id === id);
+        if (!target) return false;
+        let data: Record<string, unknown> = {};
+        try {
+          const parsed: unknown = JSON.parse(target.data);
+          if (parsed && typeof parsed === 'object' && !Array.isArray(parsed)) {
+            data = parsed as Record<string, unknown>;
+          }
+        } catch {
+          data = {};
         }
+        data.claim = claim.trim();
+        const updated = await invoke<EntityInfo>('update_entity_cmd', {
+          soulId: soul.soul_id,
+          entityId: id,
+          status: 'candidate',
+          data: JSON.stringify(data),
+          deviceId: deviceId(),
+        });
+        setEntities((current) => current.map((entity) => (entity.id === id ? updated : entity)));
+        try {
+          await refreshEntities(soul.soul_id);
+        } catch {
+          setError('The entity was updated, but the full entity list could not be refreshed.');
+        }
+        return true;
       } catch {
-        data = {};
+        setError(safeErrorMessage('изменить запись'));
+        return false;
       }
-      data.claim = claim.trim();
-      await invoke('update_entity_cmd', {
-        soulId: soul.soul_id,
-        entityId: id,
-        status: 'candidate',
-        data: JSON.stringify(data),
-        deviceId,
-      });
-      await refreshEntities(soul.soul_id);
-    } catch {
-      setError(safeErrorMessage('изменить запись'));
-    } finally {
-      setBusyEntityId(null);
-    }
+    });
   };
 
   if (demoOnly) {
@@ -389,11 +474,12 @@ export function App() {
   return (
     <div className="app-shell">
       <Nav
-        active={tab}
+        active={effectiveTab}
         onTab={setTab}
         onDemo={() => window.location.assign(`${window.location.pathname}?demo=1`)}
         candidateCount={candidateCount}
         entityCount={entities.length}
+        showPreview={soul !== null && !soul.activated}
       />
 
       {error && (
@@ -414,7 +500,12 @@ export function App() {
         </div>
       )}
 
-      <main id="main-panel" role="tabpanel" tabIndex={-1}>
+      <main
+        id="main-panel"
+        role="tabpanel"
+        tabIndex={-1}
+        aria-labelledby={`nav-tab-${effectiveTab}`}
+      >
         {startupFailed ? (
           <section aria-labelledby="startup-error-title">
             <h2 id="startup-error-title">Не удалось открыть локальные данные</h2>
@@ -441,19 +532,21 @@ export function App() {
             onSave={handleSaveCalibration}
             onComplete={handleCalibrationComplete}
             onBack={() => setShowCalibration(false)}
+            globallyBusy={activeMutation !== null}
           />
-        ) : tab === 'preview' && soul && !soul.activated ? (
+        ) : effectiveTab === 'preview' && soul && !soul.activated ? (
           <Preview
             entities={entities}
             previewConfirmed={soul.preview_confirmed}
-            busyId={busyEntityId}
+            busyIds={busyEntityIds}
+            globallyBusy={activeMutation !== null}
             onEdit={handleEditEntity}
             onConfirmPreview={handleConfirmPreview}
             onResetPreview={handleResetPreview}
             onActivate={handleActivatePreview}
             onBack={() => setTab('home')}
           />
-        ) : tab === 'home' ? (
+        ) : effectiveTab === 'home' ? (
           <Home
             soul={soul}
             onCreate={handleCreate}
@@ -471,8 +564,9 @@ export function App() {
             rejectedCount={entities.filter((e) => e.status === 'rejected').length}
             previewConfirmed={soul ? soul.preview_confirmed : false}
             connectedClients={connectedClients}
+            busy={activeMutation !== null}
           />
-        ) : tab === 'inbox' ? (
+        ) : effectiveTab === 'inbox' ? (
           <Inbox
             entities={entities}
             onConfirm={handleConfirmEntity}
@@ -481,13 +575,14 @@ export function App() {
             onUndo={handleUndoEntity}
             onDismissUndo={() => setLastReview(null)}
             lastReview={lastReview}
-            busyId={busyEntityId}
+            busyIds={busyEntityIds}
+            globallyBusy={activeMutation !== null}
           />
-        ) : tab === 'tests' ? (
+        ) : effectiveTab === 'tests' ? (
           <Tests soul={soul} entities={entities} />
-        ) : tab === 'context' ? (
+        ) : effectiveTab === 'context' ? (
           <ContextPage soul={soul} entities={entities} />
-        ) : tab === 'policies' ? (
+        ) : effectiveTab === 'policies' ? (
           <Policies />
         ) : (
           <Settings

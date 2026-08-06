@@ -2,7 +2,8 @@
  * Адаптер Gemini Web (gemini.google.com), разметка v1.
  */
 
-import type { AdapterEvent, HealthReport, Page, SiteAdapter } from './types';
+import { probeAdapter } from './probe';
+import type { AdapterEvent, SiteAdapter } from './types';
 
 export const geminiAdapter: SiteAdapter = {
   id: 'gemini',
@@ -15,27 +16,11 @@ export const geminiAdapter: SiteAdapter = {
   sendSelector: 'button[aria-label="Send message"]',
   mountSelector: 'div.ql-container',
   historySelector: 'main',
+  userMessageSelector: 'user-query',
   inputKind: 'contenteditable',
 
-  probe(page: Page): HealthReport {
-    const input = page.querySelector('div.ql-editor[contenteditable="true"]');
-    const send = page.querySelector('button[aria-label="Send message"]');
-    const mount = page.querySelector('div.ql-container');
-    const missing = [
-      ...(input ? [] : ['div.ql-editor[contenteditable="true"]']),
-      ...(send ? [] : ['button[aria-label="Send message"]']),
-      ...(mount ? [] : ['div.ql-container']),
-    ];
-    return {
-      status: missing.length === 0 ? 'ok' : 'failed',
-      missing,
-      checked: [
-        'div.ql-editor[contenteditable="true"]',
-        'button[aria-label="Send message"]',
-        'div.ql-container',
-      ],
-      at: Date.now(),
-    };
+  probe(page) {
+    return probeAdapter(this, page, { inputTag: 'DIV', mountTag: 'DIV' });
   },
 
   isSendEvent(event: AdapterEvent): boolean {

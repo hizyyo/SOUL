@@ -138,16 +138,58 @@ fn atomic_write(target: &Path, content: &str) -> Result<(), String> {
         .map(|f| f.to_string_lossy().to_string())
         .unwrap_or_else(|| "config".to_string());
     let tmp = dir.join(format!(".{name}.soul-tmp-{}", Uuid::new_v4()));
+    let replace_backup = replacement_backup_path(target);
+    if !target.exists() && replace_backup.exists() {
+        std::fs::rename(&replace_backup, target)
+            .map_err(|e| format!("Cannot recover interrupted config replacement: {e}"))?;
+    }
     std::fs::write(&tmp, content).map_err(|e| format!("Cannot write config: {e}"))?;
-    std::fs::rename(&tmp, target)
-        .or_else(|_| {
-            // Windows: rename поверх существующего файла может отказать —
-            // убираем цель и повторяем; проверка после записи + backup + rollback
-            // гарантируют безопасность даже в этом случае.
-            std::fs::remove_file(target)?;
-            std::fs::rename(&tmp, target)
-        })
-        .map_err(|e| format!("Cannot replace config file: {e}"))
+    match std::fs::rename(&tmp, target) {
+        Ok(()) => Ok(()),
+        Err(first) if target.exists() => {
+            let _ = std::fs::remove_file(&replace_backup);
+            std::fs::rename(target, &replace_backup)
+                .map_err(|e| format!("Cannot preserve config before replacement: {e}"))?;
+            match std::fs::rename(&tmp, target) {
+                Ok(()) => {
+                    let _ = std::fs::remove_file(&replace_backup);
+                    Ok(())
+                }
+                Err(second) => {
+                    let _ = std::fs::rename(&replace_backup, target);
+                    let _ = std::fs::remove_file(&tmp);
+                    Err(format!(
+                        "Cannot replace config file: {second} (initial rename: {first})"
+                    ))
+                }
+            }
+        }
+        Err(e) => {
+            let _ = std::fs::remove_file(&tmp);
+            Err(format!("Cannot replace config file: {e}"))
+        }
+    }
+}
+
+fn replacement_backup_path(target: &Path) -> PathBuf {
+    let dir = target.parent().unwrap_or_else(|| Path::new("."));
+    let name = target
+        .file_name()
+        .map(|f| f.to_string_lossy().to_string())
+        .unwrap_or_else(|| "config".to_string());
+    dir.join(format!(".{name}.soul-replace-backup"))
+}
+
+fn recover_atomic_target(target: &Path) -> Result<(), String> {
+    let backup = replacement_backup_path(target);
+    if !target.exists() && backup.exists() {
+        std::fs::rename(&backup, target)
+            .map_err(|e| format!("Cannot recover interrupted config replacement: {e}"))?;
+    } else if target.exists() && backup.exists() {
+        std::fs::remove_file(&backup)
+            .map_err(|e| format!("Cannot remove stale config replacement backup: {e}"))?;
+    }
+    Ok(())
 }
 
 // ---------------------------------------------------------------------------
@@ -198,8 +240,41 @@ fn soul_command(config: &str, client: ClientId) -> Result<Option<String>, String
     }
 }
 
+fn soul_capability(config: &str, client: ClientId) -> Result<Option<String>, String> {
+    match client {
+        ClientId::Codex => {
+            let value: toml::Value =
+                toml::from_str(config).map_err(|e| format!("config is not valid TOML: {e}"))?;
+            Ok(value
+                .get("mcp_servers")
+                .and_then(|s| s.get("soul"))
+                .and_then(|s| s.get("env"))
+                .and_then(|env| env.get(crate::mcp::MCP_CAPABILITY_ENV))
+                .and_then(|v| v.as_str())
+                .map(str::to_string))
+        }
+        _ => {
+            let value: serde_json::Value = serde_json::from_str(config)
+                .map_err(|e| format!("config is not valid JSON: {e}"))?;
+            Ok(value
+                .get("mcpServers")
+                .and_then(|s| s.get("soul"))
+                .and_then(|s| s.get("env"))
+                .and_then(|env| env.get(crate::mcp::MCP_CAPABILITY_ENV))
+                .and_then(|v| v.as_str())
+                .map(str::to_string))
+        }
+    }
+}
+
 /// Точечная вставка записи soul в JSON-конфигурацию (прочие ключи сохраняются).
-fn insert_soul_entry_json(config: &str, binary: &str) -> Result<String, String> {
+fn insert_soul_entry_json(
+    config: &str,
+    binary: &str,
+    app_dir: &Path,
+    client: ClientId,
+    capability: &str,
+) -> Result<String, String> {
     let trimmed = config.trim();
     let mut value: serde_json::Value = if trimmed.is_empty() {
         serde_json::Value::Object(Default::default())
@@ -216,7 +291,15 @@ fn insert_soul_entry_json(config: &str, binary: &str) -> Result<String, String> 
         .ok_or_else(|| "mcpServers is not a JSON object".to_string())?;
     servers.insert(
         "soul".to_string(),
-        serde_json::json!({ "command": binary, "args": [] }),
+        serde_json::json!({
+            "command": binary,
+            "args": [],
+            "env": {
+                "SOUL_APP_DIR": app_dir.to_string_lossy(),
+                "SOUL_MCP_CLIENT": client.as_str(),
+                crate::mcp::MCP_CAPABILITY_ENV: capability
+            }
+        }),
     );
     serde_json::to_string_pretty(&value).map_err(|e| format!("Cannot serialize config: {e}"))
 }
@@ -224,14 +307,24 @@ fn insert_soul_entry_json(config: &str, binary: &str) -> Result<String, String> 
 /// Точечная вставка записи soul в TOML-конфигурацию Codex: добавляется
 /// только секция [mcp_servers.soul] в конец файла — остальное содержимое
 /// не переписывается (комментарии и форматирование пользователя сохраняются).
-fn insert_soul_entry_toml(config: &str, binary: &str) -> Result<String, String> {
+fn insert_soul_entry_toml(
+    config: &str,
+    binary: &str,
+    app_dir: &Path,
+    client: ClientId,
+    capability: &str,
+) -> Result<String, String> {
     let mut out = config.to_string();
     if !out.ends_with('\n') {
         out.push('\n');
     }
     out.push_str(&format!(
-        "\n[mcp_servers.soul]\ncommand = '{}'\nargs = []\n",
-        binary.replace('\'', "''")
+        "\n[mcp_servers.soul]\ncommand = '{}'\nargs = []\nenv = {{ SOUL_APP_DIR = '{}', SOUL_MCP_CLIENT = '{}', {} = '{}' }}\n",
+        binary.replace('\'', "''"),
+        app_dir.to_string_lossy().replace('\'', "''"),
+        client.as_str(),
+        crate::mcp::MCP_CAPABILITY_ENV,
+        capability
     ));
     // Проверяем, что результат — валидный TOML с нашей записью (fail-closed).
     let value: toml::Value =
@@ -389,6 +482,9 @@ pub fn detect_clients_for(home: &Path, app_dir: &Path, binary: &Path) -> Vec<Cli
 fn detect_client(app_dir: &Path, binary: &Path, client: ClientId, home: &Path) -> ClientStatus {
     let config_path = client_config_path(client, home);
     let backup_path = read_state(app_dir, client).map(|s| s.backup_path);
+    if let Err(e) = recover_atomic_target(&config_path) {
+        return build_status(client, &config_path, binary, false, Some(e), backup_path);
+    }
     let (connected, error) = if !config_path.exists() {
         (false, None)
     } else {
@@ -396,12 +492,28 @@ fn detect_client(app_dir: &Path, binary: &Path, client: ClientId, home: &Path) -
             Ok(text) => match soul_command(&text, client) {
                 Ok(None) => (false, None),
                 Ok(Some(cmd)) => {
-                    if cmd == binary.to_string_lossy() {
+                    let capability_ok = crate::crypto::ensure_local_capability_secret(app_dir)
+                        .ok()
+                        .and_then(|expected| {
+                            soul_capability(&text, client)
+                                .ok()
+                                .flatten()
+                                .map(|actual| actual == expected)
+                        })
+                        .unwrap_or(false);
+                    if cmd == binary.to_string_lossy() && capability_ok {
                         (true, None)
                     } else {
                         (
                             false,
-                            Some("soul entry exists but points to a different command".into()),
+                            Some(
+                                if cmd != binary.to_string_lossy() {
+                                    "soul entry exists but points to a different command"
+                                } else {
+                                    "soul entry is missing valid local capability authorization"
+                                }
+                                .into(),
+                            ),
                         )
                     }
                 }
@@ -436,6 +548,7 @@ pub fn connect_client_for(
     client: ClientId,
 ) -> Result<ClientStatus, String> {
     let config_path = client_config_path(client, home);
+    recover_atomic_target(&config_path)?;
 
     // Idempotентность: уже подключено этим же бинарником — просто статус.
     let original = if config_path.exists() {
@@ -443,9 +556,17 @@ pub fn connect_client_for(
     } else {
         String::new()
     };
-    match soul_command(&original, client) {
+    let mut working = original.clone();
+    let capability = crate::crypto::ensure_local_capability_secret(app_dir)?;
+    match soul_command(&working, client) {
         Ok(Some(cmd)) if cmd == binary.to_string_lossy() => {
-            return Ok(detect_client(app_dir, binary, client, home));
+            if soul_capability(&working, client)?.as_deref() == Some(capability.as_str()) {
+                return Ok(detect_client(app_dir, binary, client, home));
+            }
+            working = match client {
+                ClientId::Codex => remove_soul_entry_toml(&working)?,
+                _ => remove_soul_entry_json(&working)?,
+            };
         }
         Ok(Some(_)) => {
             return Err(
@@ -457,7 +578,7 @@ pub fn connect_client_for(
         Ok(None) => {}
     }
 
-    // Backup исходного файла (даже если он отсутствовал — пустой backup
+    // Backup точного исходного файла (даже если он отсутствовал — пустой backup
     // фиксирует «было пусто» и позволяет restore при отключении).
     let dir = config_path
         .parent()
@@ -479,8 +600,20 @@ pub fn connect_client_for(
     std::fs::write(&backup_path, &original).map_err(|e| format!("Cannot write backup: {e}"))?;
 
     let modified = match client {
-        ClientId::Codex => insert_soul_entry_toml(&original, &binary.to_string_lossy()),
-        _ => insert_soul_entry_json(&original, &binary.to_string_lossy()),
+        ClientId::Codex => insert_soul_entry_toml(
+            &working,
+            &binary.to_string_lossy(),
+            app_dir,
+            client,
+            &capability,
+        ),
+        _ => insert_soul_entry_json(
+            &working,
+            &binary.to_string_lossy(),
+            app_dir,
+            client,
+            &capability,
+        ),
     }?;
     atomic_write(&config_path, &modified)?;
 
@@ -532,6 +665,35 @@ pub fn connect_client_for(
     Ok(detect_client(app_dir, binary, client, home))
 }
 
+/// Removes all SOUL-managed MCP entries that can be safely parsed, then drops
+/// SOUL's integration state and backups. Callers rotate the capability secret
+/// first, so a malformed config that cannot be edited cannot retain access.
+pub fn disconnect_all_after_capability_revocation(app_dir: &Path) {
+    let Some(home) = home_dir() else {
+        remove_all_states_and_backups(app_dir);
+        return;
+    };
+    disconnect_all_after_capability_revocation_for(&home, app_dir);
+}
+
+fn disconnect_all_after_capability_revocation_for(home: &Path, app_dir: &Path) {
+    for client in ClientId::all() {
+        let _ = disconnect_client_for(home, app_dir, client);
+    }
+    remove_all_states_and_backups(app_dir);
+}
+
+fn remove_all_states_and_backups(app_dir: &Path) {
+    for client in ClientId::all() {
+        if let Some(state) = read_state(app_dir, client) {
+            let _ = std::fs::remove_file(state.backup_path);
+        }
+        remove_state(app_dir, client);
+    }
+    let integrations_dir = app_dir.join("integrations");
+    let _ = std::fs::remove_dir(&integrations_dir);
+}
+
 /// Отключение: если файл не менялся с момента подключения — восстанавливается
 /// backup; если менялся (пользователь/клиент добавили своё) — удаляется только
 /// запись SOUL, чужие изменения сохраняются. Проверка после каждого шага.
@@ -549,6 +711,7 @@ pub fn disconnect_client_for(
     let state = read_state(app_dir, client)
         .ok_or("This client was not connected by SOUL. Nothing to disconnect.".to_string())?;
     let config_path = PathBuf::from(&state.config_path);
+    recover_atomic_target(&config_path)?;
     let current =
         std::fs::read_to_string(&config_path).map_err(|e| format!("Cannot read config: {e}"))?;
 
@@ -618,6 +781,7 @@ pub fn rollback_client_for(
     let state = read_state(app_dir, client)
         .ok_or("No rollback state found for this client.".to_string())?;
     let config_path = PathBuf::from(&state.config_path);
+    recover_atomic_target(&config_path)?;
     let original = std::fs::read_to_string(&state.backup_path)
         .map_err(|e| format!("Cannot read backup: {e}"))?;
     if state.original_hash == sha256("") {
@@ -749,6 +913,15 @@ mod tests {
         let v: serde_json::Value = serde_json::from_str(&text).unwrap();
         assert_eq!(v["mcpServers"]["soul"]["command"], binary_str(&env));
         assert_eq!(
+            v["mcpServers"]["soul"]["env"]["SOUL_APP_DIR"],
+            env.app_dir.to_string_lossy().as_ref()
+        );
+        assert!(
+            v["mcpServers"]["soul"]["env"][crate::mcp::MCP_CAPABILITY_ENV]
+                .as_str()
+                .is_some_and(|secret| secret.len() == 64)
+        );
+        assert_eq!(
             v["mcpServers"]["other"]["command"], "x",
             "чужая запись сохраняется"
         );
@@ -787,6 +960,35 @@ mod tests {
     }
 
     #[test]
+    fn capability_upgrade_rolls_back_to_the_byte_exact_original_config() {
+        let env = TestEnv::new();
+        let original = format!(
+            "{{\n  \"mcpServers\": {{\n    \"soul\": {{ \"command\": \"{}\" }}\n  }}\n}}\n",
+            binary_str(&env).replace('\\', "\\\\")
+        );
+        let path = json_cfg(&env, &original);
+
+        connect(&env, ClientId::ClaudeCode).unwrap();
+        rollback(&env, ClientId::ClaudeCode).unwrap();
+
+        assert_eq!(fs::read_to_string(path).unwrap(), original);
+    }
+
+    #[test]
+    fn deletion_cleanup_removes_all_managed_client_entries_and_state() {
+        let env = TestEnv::new();
+        connect(&env, ClientId::ClaudeCode).unwrap();
+        connect(&env, ClientId::Cursor).unwrap();
+
+        disconnect_all_after_capability_revocation_for(&env.home, &env.app_dir);
+
+        assert!(!client_config_path(ClientId::ClaudeCode, &env.home).exists());
+        assert!(!client_config_path(ClientId::Cursor, &env.home).exists());
+        assert!(!state_path(&env.app_dir, ClientId::ClaudeCode).exists());
+        assert!(!state_path(&env.app_dir, ClientId::Cursor).exists());
+    }
+
+    #[test]
     fn connect_creates_missing_config() {
         let env = TestEnv::new();
         connect(&env, ClientId::ClaudeCode).unwrap();
@@ -794,6 +996,27 @@ mod tests {
         assert!(p.exists());
         let v: serde_json::Value = serde_json::from_str(&fs::read_to_string(p).unwrap()).unwrap();
         assert_eq!(v["mcpServers"]["soul"]["command"], binary_str(&env));
+    }
+
+    #[test]
+    fn connect_recovers_interrupted_config_replacement_before_reading() {
+        let env = TestEnv::new();
+        let path = client_config_path(ClientId::ClaudeCode, &env.home);
+        fs::create_dir_all(path.parent().unwrap()).unwrap();
+        let replacement_backup = replacement_backup_path(&path);
+        fs::write(
+            &replacement_backup,
+            r#"{ "mcpServers": { "other": { "command": "x" } } }"#,
+        )
+        .unwrap();
+
+        connect(&env, ClientId::ClaudeCode).unwrap();
+
+        let value: serde_json::Value =
+            serde_json::from_str(&fs::read_to_string(&path).unwrap()).unwrap();
+        assert_eq!(value["mcpServers"]["other"]["command"], "x");
+        assert_eq!(value["mcpServers"]["soul"]["command"], binary_str(&env));
+        assert!(!replacement_backup.exists());
     }
 
     #[test]
@@ -813,6 +1036,7 @@ mod tests {
         assert!(p.exists());
         let text = fs::read_to_string(p).unwrap();
         assert!(text.contains("[mcp_servers.soul]"));
+        assert!(text.contains(crate::mcp::MCP_CAPABILITY_ENV));
     }
 
     #[test]

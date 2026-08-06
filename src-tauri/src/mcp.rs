@@ -9,10 +9,11 @@
 //! поведение полностью контролируется и покрыто тестами.
 
 use crate::context::{self, ContextQuery};
+use crate::crypto;
 use crate::package::{self, DisclosureReceipt};
 use rusqlite::{Connection, OpenFlags};
 use serde_json::{json, Value};
-use std::io::{BufRead, Read, Write};
+use std::io::{BufRead, Write};
 use std::path::Path;
 
 pub const MCP_PROTOCOL_VERSION: &str = "2025-06-18";
@@ -20,6 +21,7 @@ pub const SERVER_NAME: &str = "soul-mcp";
 pub const SERVER_VERSION: &str = env!("CARGO_PKG_VERSION");
 pub const TOOL_GET_CONTEXT: &str = "soul.get_context";
 pub const PROMPT_TASK_START: &str = "soul.task_start";
+pub const MCP_CAPABILITY_ENV: &str = "SOUL_MCP_CAPABILITY";
 
 const JSONRPC_PARSE_ERROR: i64 = -32700;
 const JSONRPC_INVALID_REQUEST: i64 = -32600;
@@ -76,7 +78,7 @@ fn get_context_tool_spec() -> Value {
                         "type": "string",
                         "enum": ["public", "internal", "private", "sensitive", "restricted"]
                     },
-                    "description": "Allowed sensitivity levels. Empty = all except restricted."
+                    "description": "Allowed sensitivity levels. Empty = public, internal and private; sensitive and restricted require explicit selection."
                 },
                 "statuses": {
                     "type": "array",
@@ -139,6 +141,12 @@ pub fn resolve_app_dir() -> Result<std::path::PathBuf, String> {
     Err("Cannot resolve SOUL app data directory. Set SOUL_APP_DIR.".to_string())
 }
 
+pub fn authorize_process(app_dir: &Path) -> Result<(), String> {
+    let supplied = std::env::var(MCP_CAPABILITY_ENV)
+        .map_err(|_| "Missing local MCP capability authorization.".to_string())?;
+    crypto::verify_local_capability_secret(app_dir, &supplied)
+}
+
 /// Клиент, от имени которого сделан вызов. По умолчанию "unknown" — сервер не
 /// угадывает и не подглядывает; клиенты могут передавать имя через env.
 fn client_name() -> String {
@@ -158,6 +166,36 @@ pub fn serve_stdio(app_dir: &Path) -> Result<(), String> {
 /// SDK — 4 МБ). Строки длиннее отклоняются с parse-ошибкой, цикл не рвётся.
 pub const MCP_MAX_LINE_BYTES: usize = 4 * 1024 * 1024;
 
+fn read_bounded_line<R: BufRead>(
+    reader: &mut R,
+    line: &mut Vec<u8>,
+) -> std::io::Result<Option<bool>> {
+    line.clear();
+    let mut oversized = false;
+    loop {
+        let available = reader.fill_buf()?;
+        if available.is_empty() {
+            return Ok((!line.is_empty() || oversized).then_some(oversized));
+        }
+        let newline = available.iter().position(|byte| *byte == b'\n');
+        let consumed = newline.map_or(available.len(), |index| index + 1);
+
+        if !oversized {
+            let capacity = MCP_MAX_LINE_BYTES
+                .saturating_add(1)
+                .saturating_sub(line.len());
+            let copied = consumed.min(capacity);
+            line.extend_from_slice(&available[..copied]);
+            oversized = copied < consumed || line.len() > MCP_MAX_LINE_BYTES;
+        }
+        reader.consume(consumed);
+
+        if newline.is_some() {
+            return Ok(Some(oversized));
+        }
+    }
+}
+
 /// Тестируемая обвязка: читает строки из reader, пишет ответы в writer.
 pub fn serve_io<R: BufRead, W: Write>(
     reader: &mut R,
@@ -166,21 +204,12 @@ pub fn serve_io<R: BufRead, W: Write>(
 ) -> Result<(), String> {
     let mut line: Vec<u8> = Vec::new();
     loop {
-        line.clear();
-        let n = reader
-            .read_until(b'\n', &mut line)
-            .map_err(|e| format!("stdin read failed: {e}"))?;
-        if n == 0 {
+        let Some(oversized) =
+            read_bounded_line(reader, &mut line).map_err(|e| format!("stdin read failed: {e}"))?
+        else {
             return Ok(());
-        }
-        if line.len() > MCP_MAX_LINE_BYTES {
-            if line.last() != Some(&b'\n') {
-                // Досчитываем остаток строки, чтобы не разъехаться по кадрам.
-                let mut drain: Vec<u8> = Vec::new();
-                let _ = reader
-                    .take(MCP_MAX_LINE_BYTES as u64 + 1)
-                    .read_to_end(&mut drain);
-            }
+        };
+        if oversized {
             write_line(
                 writer,
                 &rpc_error(Value::Null, JSONRPC_PARSE_ERROR, "Request line too large"),
@@ -508,7 +537,7 @@ mod tests {
         assert!(serialized.starts_with("SOUL CONTEXT"));
         assert!(serialized.contains("[") && serialized.contains("preference"));
         let metadata: Value = serde_json::from_str(content[1]["text"].as_str().unwrap()).unwrap();
-        assert_eq!(metadata["entityCount"], 2);
+        assert_eq!(metadata["entityCount"], 1);
         assert_eq!(metadata["policyVersion"], context::CONTEXT_POLICY_VERSION);
         assert!(metadata["stateVersion"].as_str().unwrap().len() == 8);
 
@@ -521,7 +550,7 @@ mod tests {
         let text = std::fs::read_to_string(path).unwrap();
         let receipt: DisclosureReceipt = serde_json::from_str(&text).unwrap();
         assert_eq!(receipt.kind, "disclosure");
-        assert_eq!(receipt.entity_count, 2);
+        assert_eq!(receipt.entity_count, 1);
         assert!(!text.contains("Prefers concise answers"));
         assert!(!text.contains("Never share medical data"));
         assert!(!text.contains("ent_"));
@@ -641,8 +670,9 @@ mod tests {
 
     /// End-to-end: запускает настоящий бинарь soul-mcp.exe с SOUL_APP_DIR,
     /// гоняет initialize + tools/call по stdio и проверяет ответы. Если
-    /// бинарь не собран (например, `cargo test --lib`) — тест пропускается.
+    /// Запускается release gate после сборки sidecar-бинарей.
     #[test]
+    #[ignore = "run through pnpm release:check after building release sidecars"]
     fn real_binary_serves_context_over_stdio() {
         use std::io::Write as _;
         use std::process::{Command, Stdio};
@@ -666,6 +696,10 @@ mod tests {
 
         let mut child = Command::new(&bin)
             .env("SOUL_APP_DIR", &env.dir)
+            .env(
+                MCP_CAPABILITY_ENV,
+                crate::crypto::ensure_local_capability_secret(&env.dir).unwrap(),
+            )
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
             .stderr(Stdio::null())
@@ -700,12 +734,12 @@ mod tests {
             .as_str()
             .unwrap()
             .starts_with("SOUL CONTEXT"));
-        assert!(content[0]["text"].as_str().unwrap().contains("entities: 2"));
+        assert!(content[0]["text"].as_str().unwrap().contains("entities: 1"));
         assert!(content[0]["text"]
             .as_str()
             .unwrap()
             .contains("Prefers concise answers"));
-        assert!(content[0]["text"]
+        assert!(!content[0]["text"]
             .as_str()
             .unwrap()
             .contains("Never share medical data"));
@@ -761,7 +795,16 @@ mod tests {
         input.push('{');
         input.push_str(&"x".repeat(MCP_MAX_LINE_BYTES));
         input.push_str("\n{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"initialize\"}\n");
-        let mut reader = Cursor::new(input.into_bytes());
+        let bytes = input.into_bytes();
+        let mut bounded_reader = Cursor::new(bytes.clone());
+        let mut bounded_line = Vec::new();
+        assert_eq!(
+            read_bounded_line(&mut bounded_reader, &mut bounded_line).unwrap(),
+            Some(true)
+        );
+        assert_eq!(bounded_line.len(), MCP_MAX_LINE_BYTES + 1);
+
+        let mut reader = Cursor::new(bytes);
         let mut writer: Vec<u8> = Vec::new();
         serve_io(&mut reader, &mut writer, &env.dir).unwrap();
         let out = String::from_utf8(writer).unwrap();

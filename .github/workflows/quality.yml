@@ -1,0 +1,67 @@
+name: Quality
+
+on:
+  pull_request:
+  push:
+    branches: [master]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  windows:
+    runs-on: windows-latest
+    timeout-minutes: 90
+    env:
+      SOUL_TARGET_TRIPLE: x86_64-pc-windows-msvc
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: pnpm/action-setup@v4
+        with:
+          version: 11.12.0
+          run_install: false
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 26.4.0
+          cache: pnpm
+
+      - name: Install Rust toolchain
+        run: rustup toolchain install 1.97.1 --profile minimal --component rustfmt --component clippy
+
+      - name: Install dependencies
+        run: pnpm install --frozen-lockfile
+
+      - name: Prepare real release sidecars
+        run: pnpm build:sidecars
+
+      - name: Frontend quality
+        run: |
+          pnpm typecheck
+          pnpm lint
+          pnpm test
+          pnpm build
+          pnpm build:companion
+
+      - name: Rust quality
+        working-directory: src-tauri
+        run: |
+          cargo fmt --check
+          cargo clippy --locked --target x86_64-pc-windows-msvc --all-targets -- -D warnings
+          cargo test --locked --target x86_64-pc-windows-msvc --lib
+
+      - name: Release tests, prepared-sidecar smoke tests, and Tauri assembly
+        run: pnpm release:check
+
+      - name: Upload Browser Companion ZIP and checksum
+        uses: actions/upload-artifact@v4
+        with:
+          name: soul-browser-companion-${{ github.sha }}
+          path: |
+            artifacts/browser-companion/*.zip
+            artifacts/browser-companion/SHA256SUMS
+          if-no-files-found: error
+          retention-days: 14

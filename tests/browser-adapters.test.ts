@@ -10,6 +10,9 @@ function element(over: Partial<PageElement> = {}): PageElement {
     tagName: 'DIV',
     ariaLabel: null,
     value: '',
+    connected: true,
+    editable: true,
+    enabled: true,
     click: () => {},
     focus: () => {},
     ...over,
@@ -48,10 +51,14 @@ describe('adapter probe: fail-closed при изменении разметки'
     it(`${adapter.id}: ok при полной разметке`, () => {
       const selectorToElement: Record<string, PageElement | null> = {};
       for (const selector of adapter.requiredSelectors) {
-        selectorToElement[selector] = element({ tagName: 'TEXTAREA' });
+        selectorToElement[selector] = element({
+          tagName: adapter.inputKind === 'textarea' ? 'TEXTAREA' : 'DIV',
+        });
       }
       selectorToElement[adapter.sendSelector] = element({ tagName: 'BUTTON' });
-      selectorToElement[adapter.mountSelector] = element();
+      selectorToElement[adapter.mountSelector] = element({
+        tagName: adapter.id === 'gemini' ? 'DIV' : 'FORM',
+      });
       const report = adapter.probe(fakePage(selectorToElement));
       expect(report.status).toBe('ok');
       expect(report.missing).toEqual([]);
@@ -63,7 +70,7 @@ describe('adapter probe: fail-closed при изменении разметки'
       expect(report.missing).not.toEqual([]);
       expect(report.missing).toContain(adapter.inputSelector);
       const known = [...adapter.requiredSelectors, adapter.sendSelector, adapter.mountSelector];
-      expect(report.missing.every((s) => known.includes(s))).toBe(true);
+      expect(report.missing.every((problem) => known.some((selector) => problem.startsWith(selector)))).toBe(true);
     });
 
     it(`${adapter.id}: failed при изменённой разметке (устаревший селектор)`, () => {
@@ -72,6 +79,23 @@ describe('adapter probe: fail-closed при изменении разметки'
       expect(report.status).toBe('failed');
       expect(report.missing.some((s) => s === adapter.inputSelector)).toBe(false);
       expect(report.missing.some((s) => s === adapter.sendSelector)).toBe(true);
+    });
+
+    it(`${adapter.id}: failed при семантически непригодных элементах`, () => {
+      const selectorToElement: Record<string, PageElement | null> = {
+        [adapter.inputSelector]: element({
+          tagName: adapter.inputKind === 'textarea' ? 'TEXTAREA' : 'DIV',
+          editable: false,
+        }),
+        [adapter.sendSelector]: element({ tagName: 'BUTTON', connected: false }),
+        [adapter.mountSelector]: element({
+          tagName: adapter.id === 'gemini' ? 'DIV' : 'FORM',
+        }),
+      };
+      const report = adapter.probe(fakePage(selectorToElement));
+      expect(report.status).toBe('failed');
+      expect(report.missing).toContain(`${adapter.inputSelector} (editable)`);
+      expect(report.missing.some((problem) => problem.startsWith(adapter.sendSelector))).toBe(true);
     });
   }
 });

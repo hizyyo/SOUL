@@ -12,7 +12,8 @@ import {
 interface PreviewProps {
   entities: ReviewEntity[];
   previewConfirmed: boolean;
-  busyId: string | null;
+  busyIds: ReadonlySet<string>;
+  globallyBusy: boolean;
   onEdit: (id: string, claim: string) => void;
   onConfirmPreview: () => void;
   onResetPreview: () => void;
@@ -23,7 +24,8 @@ interface PreviewProps {
 export function Preview({
   entities,
   previewConfirmed,
-  busyId,
+  busyIds,
+  globallyBusy,
   onEdit,
   onConfirmPreview,
   onResetPreview,
@@ -104,7 +106,7 @@ export function Preview({
                 <input
                   type="checkbox"
                   checked={checked}
-                  disabled={locked || busyId === e.id}
+                  disabled={locked || globallyBusy || busyIds.has(e.id)}
                   onChange={(ev) => setIncluded((prev) => ({ ...prev, [e.id]: ev.target.checked }))}
                   style={{ marginTop: '16px', width: '16px', height: '16px' }}
                   aria-label={`Include ${e.entity_type} item`}
@@ -126,6 +128,7 @@ export function Preview({
                       <textarea
                         value={draft}
                         onChange={(ev) => setDraft(ev.target.value)}
+                        disabled={globallyBusy || busyIds.has(e.id)}
                         style={{
                           width: '100%',
                           minHeight: '52px',
@@ -138,10 +141,18 @@ export function Preview({
                         aria-label="Edit statement"
                       />
                       <div style={{ display: 'flex', gap: '6px', marginTop: '6px' }}>
-                        <button onClick={() => handleEditSave(e.id)} style={saveBtnStyle}>
+                        <button
+                          onClick={() => handleEditSave(e.id)}
+                          disabled={globallyBusy || busyIds.has(e.id)}
+                          style={saveBtnStyle}
+                        >
                           Save
                         </button>
-                        <button onClick={() => setEditingId(null)} style={cancelBtnStyle}>
+                        <button
+                          onClick={() => setEditingId(null)}
+                          disabled={globallyBusy || busyIds.has(e.id)}
+                          style={cancelBtnStyle}
+                        >
                           Cancel
                         </button>
                       </div>
@@ -187,7 +198,7 @@ export function Preview({
                     setEditingId(e.id);
                     setDraft(claimOf(e));
                   }}
-                  disabled={busyId === e.id}
+                  disabled={globallyBusy || busyIds.has(e.id)}
                   style={editBtnStyle}
                 >
                   Edit
@@ -215,10 +226,10 @@ export function Preview({
               Activation happens only after you explicitly confirm this preview. Sensitive and
               boundary items always stay in Inbox for individual confirmation.
             </p>
-            <button onClick={onConfirmPreview} style={confirmBtnStyle}>
+            <button onClick={onConfirmPreview} disabled={globallyBusy} style={confirmBtnStyle}>
               I've reviewed the preview — confirm it
             </button>
-            <button onClick={onBack} style={cancelBtnStyle}>
+            <button onClick={onBack} disabled={globallyBusy} style={cancelBtnStyle}>
               Back
             </button>
           </div>
@@ -233,17 +244,17 @@ export function Preview({
             </p>
             <button
               onClick={onResetPreview}
-              disabled={busyId !== null}
+              disabled={globallyBusy}
               style={{ ...cancelBtnStyle, whiteSpace: 'nowrap' }}
             >
               Undo confirmation
             </button>
             <button
               onClick={() => onActivate(candidates.filter((e) => isIncluded(e)).map((e) => e.id))}
-              disabled={busyId !== null}
-              style={{ ...activateBtnStyle, opacity: busyId !== null ? 0.5 : 1 }}
+              disabled={globallyBusy}
+              style={{ ...activateBtnStyle, opacity: globallyBusy ? 0.5 : 1 }}
             >
-              {busyId !== null ? 'Working...' : `Activate SOUL (${includedCount})`}
+              {globallyBusy ? 'Working...' : `Activate SOUL (${includedCount})`}
             </button>
           </div>
         )}

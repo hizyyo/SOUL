@@ -31,8 +31,14 @@ pub struct SoulEvent {
     pub provenance_ids: Vec<String>,
     pub previous_event_hash: Option<String>,
     pub content_hash: String,
+    #[serde(default = "legacy_event_hash_version")]
+    pub hash_version: i32,
     pub signature: String,
     pub created_at: String,
+}
+
+fn legacy_event_hash_version() -> i32 {
+    1
 }
 
 #[derive(Debug, Serialize, Deserialize, Clone)]
@@ -49,6 +55,7 @@ pub struct EntityRow {
 pub fn init_db(app_dir: &std::path::Path) -> SqlResult<Connection> {
     let db_path = app_dir.join("soul.db");
     let key_hex = hex::encode(crate::crypto::db_encryption_key(app_dir).map_err(to_sql_error)?);
+    recover_interrupted_migration(app_dir, &db_path, &key_hex)?;
 
     match open_encrypted(&db_path, &key_hex) {
         Ok(conn) => init_schema(conn),
@@ -57,23 +64,37 @@ pub fn init_db(app_dir: &std::path::Path) -> SqlResult<Connection> {
             // Переносим в зашифрованный файл и повторяем инициализацию.
             match migrate_plaintext_to_encrypted(app_dir, &db_path, &key_hex) {
                 Ok(conn) => init_schema(conn),
-                Err(migrate_err) if is_not_a_database(&migrate_err) => {
-                    // БД не открывается ни текущим ключом, ни как plaintext:
-                    // файл зашифрован утраченным ключом устройства (например,
-                    // после полного wipe). Данные без ключей недоступны (§4.1),
-                    // поэтому сбрасываемся к чистому листу.
-                    let _ = std::fs::remove_file(&db_path);
-                    let _ = std::fs::remove_file(app_dir.join("soul.db-wal"));
-                    let _ = std::fs::remove_file(app_dir.join("soul.db-shm"));
-                    let _ = std::fs::remove_file(app_dir.join("soul.new"));
-                    let conn = open_encrypted(&db_path, &key_hex)?;
-                    init_schema(conn)
-                }
+                Err(migrate_err) if is_not_a_database(&migrate_err) => Err(to_sql_error(format!(
+                    "SOUL database is unreadable with the current device key and is not a valid plaintext database; refusing to delete it: {migrate_err}"
+                ))),
                 Err(other) => Err(other),
             }
         }
         Err(err) => Err(err),
     }
+}
+
+fn recover_interrupted_migration(
+    app_dir: &std::path::Path,
+    db_path: &std::path::Path,
+    key_hex: &str,
+) -> SqlResult<()> {
+    if db_path.exists() {
+        return Ok(());
+    }
+    let tmp_path = app_dir.join("soul.new");
+    if tmp_path.exists() && open_encrypted(&tmp_path, key_hex).is_ok() {
+        std::fs::rename(&tmp_path, db_path)
+            .map_err(|e| to_sql_error(format!("Migration recovery failed: {e}")))?;
+        let _ = std::fs::remove_file(app_dir.join("soul.db.bak"));
+        return Ok(());
+    }
+    let bak_path = app_dir.join("soul.db.bak");
+    if bak_path.exists() {
+        std::fs::rename(&bak_path, db_path)
+            .map_err(|e| to_sql_error(format!("Migration rollback recovery failed: {e}")))?;
+    }
+    Ok(())
 }
 
 /// Конвертирует строковую ошибку (например, от операций с файлами) в
@@ -110,10 +131,13 @@ fn migrate_plaintext_to_encrypted(
     {
         let tmp = Connection::open(&tmp_path)?;
         tmp.execute_batch(&format!("PRAGMA key = \"x'{key_hex}'\";"))?;
-        tmp.execute_batch("PRAGMA journal_mode=WAL;")?;
+        // Keep migration self-contained in soul.new. WAL sidecars cannot be
+        // atomically swapped with the main database file.
+        tmp.execute_batch("PRAGMA journal_mode=DELETE;")?;
         tmp.execute_batch("PRAGMA foreign_keys=OFF;")?;
         tmp.execute_batch(BASE_SCHEMA_SQL)?;
         add_column_if_missing(&tmp, "entities", "dedup_key", "TEXT")?;
+        add_column_if_missing(&tmp, "events", "hash_version", "INTEGER NOT NULL DEFAULT 1")?;
         add_column_if_missing(
             &tmp,
             "soul_state",
@@ -122,8 +146,15 @@ fn migrate_plaintext_to_encrypted(
         )?;
         tmp.execute_batch(DEDUP_INDEX_SQL)?;
 
+        // Create every logical table before copying. These initializers may
+        // seed defaults; copy_logical_tables replaces seeded rows only when
+        // the corresponding table exists in the plaintext source.
+        crate::eval::init_evaluations(&tmp)?;
+        crate::policy::init_policies(&tmp)?;
+        crate::gateway::init_gateway(&tmp)?;
+
         let old = Connection::open(db_path)?;
-        copy_all_tables(&old, &tmp)?;
+        copy_logical_tables(&old, &tmp)?;
 
         // FTS создаётся после копирования: contentless-индекс пересобирается
         // по текущим сущностям (rowid сохраняется построчным переносом).
@@ -142,34 +173,45 @@ fn migrate_plaintext_to_encrypted(
     open_encrypted(db_path, key_hex)
 }
 
-/// Переносит все обычные таблицы (кроме FTS-виртуальной) с сохранением rowid:
-/// FTS5-JOIN использует `entities.rowid = entity_fts.rowid`, поэтому rowid
-/// обязан совпадать один в один после миграции.
-fn copy_all_tables(old: &Connection, new: &Connection) -> SqlResult<()> {
-    let mut tables = Vec::new();
-    {
-        let mut stmt = old.prepare(
-            "SELECT name FROM sqlite_master WHERE type='table' AND name NOT LIKE 'sqlite_%' AND name != 'entity_fts' ORDER BY name",
-        )?;
-        let mut rows = stmt.query([])?;
-        while let Some(row) = rows.next()? {
-            tables.push(row.get::<_, String>(0)?);
-        }
-    }
+/// Only application-owned logical tables are copied. FTS virtual/shadow
+/// tables are deliberately omitted and rebuilt from entities after the copy.
+/// Rowids are preserved because entity_fts joins entities by rowid.
+fn copy_logical_tables(old: &Connection, new: &Connection) -> SqlResult<()> {
+    const LOGICAL_TABLES: [&str; 12] = [
+        "souls",
+        "events",
+        "entities",
+        "soul_state",
+        "meta",
+        "evaluations",
+        "policies",
+        "policy_meta",
+        "capabilities",
+        "gateway_receipts",
+        "gateway_connectors",
+        "gateway_meta",
+    ];
 
-    for table in &tables {
-        let cols: Vec<String> = {
-            let mut cs = old.prepare(&format!("PRAGMA table_info(\"{table}\")"))?;
-            let mut crows = cs.query([])?;
-            let mut cols = Vec::new();
-            while let Some(cr) = crows.next()? {
-                cols.push(cr.get::<_, String>(1)?);
-            }
-            cols
-        };
+    for table in LOGICAL_TABLES {
+        let exists: bool = old.query_row(
+            "SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE type='table' AND name = ?1)",
+            params![table],
+            |row| row.get(0),
+        )?;
+        if !exists {
+            continue;
+        }
+
+        let old_cols = table_columns(old, table)?;
+        let new_cols = table_columns(new, table)?;
+        let cols: Vec<String> = old_cols
+            .into_iter()
+            .filter(|column| new_cols.contains(column))
+            .collect();
         if cols.is_empty() {
             continue;
         }
+        new.execute(&format!("DELETE FROM \"{table}\""), [])?;
         let quoted: Vec<String> = cols.iter().map(|c| format!("\"{c}\"")).collect();
         let sel_sql = format!("SELECT rowid, {} FROM \"{table}\"", quoted.join(", "));
         let ins_sql = format!(
@@ -191,6 +233,14 @@ fn copy_all_tables(old: &Connection, new: &Connection) -> SqlResult<()> {
     Ok(())
 }
 
+fn table_columns(conn: &Connection, table: &str) -> SqlResult<Vec<String>> {
+    let mut stmt = conn.prepare(&format!("PRAGMA table_info(\"{table}\")"))?;
+    let columns = stmt
+        .query_map([], |row| row.get::<_, String>(1))?
+        .collect::<Result<Vec<_>, _>>()?;
+    Ok(columns)
+}
+
 fn is_not_a_database(err: &rusqlite::Error) -> bool {
     matches!(
         err,
@@ -207,6 +257,12 @@ fn init_schema(conn: Connection) -> SqlResult<Connection> {
     add_column_if_missing(&conn, "entities", "dedup_key", "TEXT")?;
     add_column_if_missing(
         &conn,
+        "events",
+        "hash_version",
+        "INTEGER NOT NULL DEFAULT 1",
+    )?;
+    add_column_if_missing(
+        &conn,
         "soul_state",
         "preview_confirmed",
         "INTEGER NOT NULL DEFAULT 0",
@@ -218,6 +274,15 @@ fn init_schema(conn: Connection) -> SqlResult<Connection> {
     crate::eval::init_evaluations(&conn)?;
     crate::policy::init_policies(&conn)?;
     crate::gateway::init_gateway(&conn)?;
+    conn.execute(
+        "DELETE FROM meta WHERE key IN (
+            'imported_content_hash',
+            'imported_soul_id',
+            'imported_state_revision'
+        )",
+        [],
+    )?;
+    ensure_active_soul(&conn)?;
 
     Ok(conn)
 }
@@ -249,6 +314,7 @@ const BASE_SCHEMA_SQL: &str = "
             provenance_ids TEXT NOT NULL DEFAULT '[]',
             previous_event_hash TEXT,
             content_hash TEXT NOT NULL,
+            hash_version INTEGER NOT NULL DEFAULT 2,
             signature TEXT NOT NULL DEFAULT '',
             created_at TEXT NOT NULL,
             FOREIGN KEY (soul_id) REFERENCES souls(soul_id)
@@ -454,20 +520,6 @@ pub fn compute_hash(data: &str) -> String {
     hex::encode(hasher.finalize())
 }
 
-pub fn count_soul(conn: &Connection, soul_id: &str) -> SqlResult<(i64, i64)> {
-    let entities: i64 = conn.query_row(
-        "SELECT COUNT(*) FROM entities WHERE soul_id = ?1",
-        params![soul_id],
-        |row| row.get(0),
-    )?;
-    let events: i64 = conn.query_row(
-        "SELECT COUNT(*) FROM events WHERE soul_id = ?1",
-        params![soul_id],
-        |row| row.get(0),
-    )?;
-    Ok((entities, events))
-}
-
 pub fn get_soul_state(conn: &Connection, soul_id: &str) -> SqlResult<(i32, String, bool, bool)> {
     let mut stmt = conn.prepare(
         "SELECT calibration_step, calibration_answers, activated, preview_confirmed FROM soul_state WHERE soul_id = ?1",
@@ -496,7 +548,8 @@ const WIPE_SQL: &str = "DELETE FROM entities;
      DELETE FROM gateway_receipts;
      DELETE FROM gateway_connectors;
      DELETE FROM gateway_meta;
-     DELETE FROM souls;";
+     DELETE FROM souls;
+     DELETE FROM meta WHERE key NOT IN ('state_revision', 'policy_revision');";
 
 pub fn wipe_all(conn: &Connection) -> SqlResult<()> {
     conn.execute_batch("PRAGMA secure_delete=ON;")?;
@@ -520,15 +573,11 @@ pub fn wipe_all_tx(tx: &Transaction<'_>) -> SqlResult<()> {
 }
 
 /// Ключи таблицы `meta` (SESSION-14): монотонные ревизии состояния и политик
-/// для кеша контекста по версии + метаданные последнего импорта для
-/// идемпотентного быстрого пути (повторный импорт того же пакета не
-/// пересобирает данные). Ревизии никогда не сбрасываются (wipe их увеличивает),
-/// поэтому ключ кеша не может случайно совпасть после цикла wipe+импорт.
+/// для кеша контекста по версии. Ревизии никогда не сбрасываются (wipe их
+/// увеличивает), поэтому ключ кеша не может случайно совпасть после wipe.
 pub const META_STATE_REVISION: &str = "state_revision";
 pub const META_POLICY_REVISION: &str = "policy_revision";
-pub const META_IMPORTED_CONTENT_HASH: &str = "imported_content_hash";
-pub const META_IMPORTED_SOUL_ID: &str = "imported_soul_id";
-pub const META_IMPORTED_STATE_REVISION: &str = "imported_state_revision";
+pub const META_ACTIVE_SOUL_ID: &str = "active_soul_id";
 
 pub fn get_meta(conn: &Connection, key: &str) -> SqlResult<Option<String>> {
     let mut stmt = conn.prepare("SELECT value FROM meta WHERE key = ?1")?;
@@ -545,6 +594,53 @@ pub fn set_meta(conn: &Connection, key: &str, value: &str) -> SqlResult<()> {
          ON CONFLICT(key) DO UPDATE SET value = excluded.value",
         params![key, value],
     )?;
+    Ok(())
+}
+
+pub fn active_soul_id(conn: &Connection) -> Result<Option<String>, String> {
+    let Some(id) = get_meta(conn, META_ACTIVE_SOUL_ID).map_err(|e| e.to_string())? else {
+        return Ok(None);
+    };
+    if get_soul(conn, &id).map_err(|e| e.to_string())?.is_none() {
+        return Err("The configured active SOUL does not exist.".to_string());
+    }
+    Ok(Some(id))
+}
+
+pub fn set_active_soul(conn: &Connection, soul_id: &str) -> Result<(), String> {
+    if get_soul(conn, soul_id)
+        .map_err(|e| e.to_string())?
+        .is_none()
+    {
+        return Err("SOUL not found.".to_string());
+    }
+    set_meta(conn, META_ACTIVE_SOUL_ID, soul_id).map_err(|e| e.to_string())?;
+    bump_state_revision(conn).map_err(|e| e.to_string())?;
+    Ok(())
+}
+
+fn ensure_active_soul(conn: &Connection) -> SqlResult<()> {
+    if let Some(active_id) = get_meta(conn, META_ACTIVE_SOUL_ID)? {
+        let exists: bool = conn.query_row(
+            "SELECT EXISTS(SELECT 1 FROM souls WHERE soul_id = ?1)",
+            params![active_id],
+            |row| row.get(0),
+        )?;
+        if exists {
+            return Ok(());
+        }
+        conn.execute(
+            "DELETE FROM meta WHERE key = ?1",
+            params![META_ACTIVE_SOUL_ID],
+        )?;
+    }
+    let mut stmt = conn.prepare("SELECT soul_id FROM souls ORDER BY created_at ASC LIMIT 2")?;
+    let ids = stmt
+        .query_map([], |row| row.get::<_, String>(0))?
+        .collect::<Result<Vec<_>, _>>()?;
+    if ids.len() == 1 {
+        set_meta(conn, META_ACTIVE_SOUL_ID, &ids[0])?;
+    }
     Ok(())
 }
 
@@ -599,6 +695,11 @@ pub fn save_calibration(
     step: i32,
     answers: &str,
 ) -> SqlResult<()> {
+    if !(0..=100).contains(&step) || answers.len() > 256 * 1024 {
+        return Err(to_sql_error(
+            "Calibration payload exceeds allowed limits.".to_string(),
+        ));
+    }
     conn.execute(
         "INSERT INTO soul_state (soul_id, calibration_step, calibration_answers)
          VALUES (?1, ?2, ?3)
@@ -606,6 +707,10 @@ pub fn save_calibration(
            calibration_step = excluded.calibration_step,
            calibration_answers = excluded.calibration_answers",
         params![soul_id, step, answers],
+    )?;
+    conn.execute(
+        "UPDATE soul_state SET preview_confirmed = 0 WHERE soul_id = ?1 AND activated = 0",
+        params![soul_id],
     )?;
     Ok(())
 }
@@ -888,6 +993,18 @@ pub fn get_entity(conn: &Connection, entity_id: &str) -> SqlResult<Option<Entity
 }
 
 const MAX_CLAIM_CHARS: usize = 2000;
+pub const MAX_ENTITY_JSON_BYTES: usize = 64 * 1024;
+pub const MAX_ENTITY_FIELD_CHARS: usize = 8_000;
+pub const MAX_ENTITY_ARRAY_ITEMS: usize = 256;
+pub const MAX_ENTITY_OBJECT_FIELDS: usize = 128;
+pub const MAX_ENTITIES_PER_SOUL: usize = 10_000;
+pub const MAX_EVENTS_PER_SOUL: usize = 50_000;
+pub const MAX_LIST_ENTITIES: usize = 10_000;
+pub const MAX_SEARCH_QUERY_CHARS: usize = 1_000;
+pub const MAX_ID_CHARS: usize = 512;
+pub const MAX_DISPLAY_NAME_CHARS: usize = 512;
+pub const MAX_EVENT_FIELD_CHARS: usize = 512;
+pub const MAX_EVENT_PAYLOAD_BYTES: usize = MAX_ENTITY_JSON_BYTES;
 
 const P0_ENTITY_TYPES: [&str; 5] = ["preference", "decision", "boundary", "goal", "fact"];
 
@@ -910,11 +1027,55 @@ pub(crate) fn validate_status_value(status: &str) -> Result<(), String> {
 }
 
 pub(crate) fn validate_entity_data_json(data: &str) -> Result<(), String> {
+    if data.len() > MAX_ENTITY_JSON_BYTES {
+        return Err(format!(
+            "Entity data is too large (limit {MAX_ENTITY_JSON_BYTES} bytes)."
+        ));
+    }
     let value: serde_json::Value =
         serde_json::from_str(data).map_err(|_| "Entity data must be valid JSON.".to_string())?;
     if !value.is_object() {
         return Err("Entity data must be a JSON object.".to_string());
     }
+    fn validate_value(value: &serde_json::Value, depth: usize) -> Result<(), String> {
+        if depth > 16 {
+            return Err("Entity data is nested too deeply.".to_string());
+        }
+        match value {
+            serde_json::Value::String(s) if s.chars().count() > MAX_ENTITY_FIELD_CHARS => {
+                Err(format!(
+                    "Entity string field is too long (limit {MAX_ENTITY_FIELD_CHARS} characters)."
+                ))
+            }
+            serde_json::Value::Array(items) => {
+                if items.len() > MAX_ENTITY_ARRAY_ITEMS {
+                    return Err(format!(
+                        "Entity array is too large (limit {MAX_ENTITY_ARRAY_ITEMS} items)."
+                    ));
+                }
+                for item in items {
+                    validate_value(item, depth + 1)?;
+                }
+                Ok(())
+            }
+            serde_json::Value::Object(fields) => {
+                if fields.len() > MAX_ENTITY_OBJECT_FIELDS {
+                    return Err(format!(
+                        "Entity object has too many fields (limit {MAX_ENTITY_OBJECT_FIELDS})."
+                    ));
+                }
+                for (key, item) in fields {
+                    if key.chars().count() > 256 {
+                        return Err("Entity field name is too long.".to_string());
+                    }
+                    validate_value(item, depth + 1)?;
+                }
+                Ok(())
+            }
+            _ => Ok(()),
+        }
+    }
+    validate_value(&value, 0)?;
     if let Some(claim) = value.get("claim").and_then(|c| c.as_str()) {
         if claim.chars().count() > MAX_CLAIM_CHARS {
             return Err(format!(
@@ -923,6 +1084,97 @@ pub(crate) fn validate_entity_data_json(data: &str) -> Result<(), String> {
         }
     }
     Ok(())
+}
+
+pub(crate) fn validate_soul_manifest_fields(
+    soul_id: &str,
+    display_name: &str,
+    device_id: &str,
+) -> Result<(), String> {
+    for (name, value, max) in [
+        ("soul id", soul_id, MAX_ID_CHARS),
+        ("display name", display_name, MAX_DISPLAY_NAME_CHARS),
+        ("device id", device_id, MAX_ID_CHARS),
+    ] {
+        if value.trim().is_empty() || value.chars().count() > max {
+            return Err(format!("{name} is empty or too long."));
+        }
+    }
+    Ok(())
+}
+
+pub(crate) fn validate_event_fields(event: &SoulEvent) -> Result<(), String> {
+    for (name, value) in [
+        ("event id", event.event_id.as_str()),
+        ("soul id", event.soul_id.as_str()),
+        ("device id", event.device_id.as_str()),
+        ("actor", event.actor.as_str()),
+        ("hlc", event.hlc.as_str()),
+        ("operation", event.operation.as_str()),
+        ("entity type", event.entity_type.as_str()),
+        ("entity id", event.entity_id.as_str()),
+        ("created at", event.created_at.as_str()),
+    ] {
+        if value.trim().is_empty() || value.chars().count() > MAX_EVENT_FIELD_CHARS {
+            return Err(format!("Event {name} is empty or too long."));
+        }
+    }
+    if event.payload.len() > MAX_EVENT_PAYLOAD_BYTES {
+        return Err(format!(
+            "Event payload is too large (limit {MAX_EVENT_PAYLOAD_BYTES} bytes)."
+        ));
+    }
+    serde_json::from_str::<serde_json::Value>(&event.payload)
+        .map_err(|_| "Event payload must be valid JSON.".to_string())?;
+    if event.provenance_ids.len() > MAX_ENTITY_ARRAY_ITEMS
+        || event
+            .provenance_ids
+            .iter()
+            .any(|id| id.chars().count() > MAX_ID_CHARS)
+    {
+        return Err("Event provenance ids exceed allowed limits.".to_string());
+    }
+    if event
+        .previous_event_hash
+        .as_ref()
+        .is_some_and(|hash| hash.len() != 64)
+        || event.content_hash.len() != 64
+    {
+        return Err("Event hash has an invalid length.".to_string());
+    }
+    if !matches!(event.hash_version, 1 | 2) {
+        return Err(format!(
+            "Unsupported event hash version: {}.",
+            event.hash_version
+        ));
+    }
+    Ok(())
+}
+
+/// Version 2 hashes the immutable event record and the previous hash, rather
+/// than hashing payload alone. This makes equal-payload events unique and
+/// prevents relinking an event without invalidating its hash.
+pub(crate) fn event_content_hash(event: &SoulEvent) -> String {
+    match event.hash_version {
+        1 => compute_hash(&event.payload),
+        _ => compute_hash(
+            &serde_json::json!({
+                "eventId": event.event_id,
+                "soulId": event.soul_id,
+                "deviceId": event.device_id,
+                "actor": event.actor,
+                "hlc": event.hlc,
+                "operation": event.operation,
+                "entityType": event.entity_type,
+                "entityId": event.entity_id,
+                "payload": event.payload,
+                "provenanceIds": event.provenance_ids,
+                "previousEventHash": event.previous_event_hash,
+                "createdAt": event.created_at,
+            })
+            .to_string(),
+        ),
+    }
 }
 
 fn read_soul_head(conn: &Connection, soul_id: &str) -> SqlResult<Option<String>> {
@@ -948,36 +1200,66 @@ pub struct NewEvent<'a> {
 }
 
 pub fn append_event(conn: &Connection, ev: &NewEvent) -> SqlResult<String> {
+    let event_count: i64 = conn.query_row(
+        "SELECT COUNT(*) FROM events WHERE soul_id = ?1",
+        params![ev.soul_id],
+        |row| row.get(0),
+    )?;
+    if event_count >= MAX_EVENTS_PER_SOUL as i64 {
+        return Err(to_sql_error(format!(
+            "Too many events for this SOUL (limit {MAX_EVENTS_PER_SOUL})."
+        )));
+    }
     let event_id = format!("evt_{}", Uuid::new_v4());
     let now = Utc::now().to_rfc3339();
-    let content_hash = compute_hash(&serde_json::to_string(ev.payload).unwrap());
     let previous = read_soul_head(conn, ev.soul_id)?;
+    let payload = serde_json::to_string(ev.payload).unwrap();
+    let mut event = SoulEvent {
+        event_id,
+        soul_id: ev.soul_id.to_string(),
+        device_id: ev.device_id.to_string(),
+        actor: ev.actor.to_string(),
+        hlc: now.clone(),
+        operation: ev.operation.to_string(),
+        entity_type: ev.entity_type.to_string(),
+        entity_id: ev.entity_id.to_string(),
+        payload,
+        provenance_ids: Vec::new(),
+        previous_event_hash: previous,
+        content_hash: "0".repeat(64),
+        hash_version: 2,
+        signature: String::new(),
+        created_at: now.clone(),
+    };
+    event.content_hash = event_content_hash(&event);
+    validate_event_fields(&event).map_err(to_sql_error)?;
 
     conn.execute(
-        "INSERT INTO events (event_id, soul_id, device_id, actor, hlc, operation, entity_type, entity_id, payload, previous_event_hash, content_hash, created_at)
-         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12)",
+        "INSERT INTO events (event_id, soul_id, device_id, actor, hlc, operation, entity_type, entity_id, payload, previous_event_hash, content_hash, hash_version, created_at)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13)",
         params![
-            event_id,
-            ev.soul_id,
-            ev.device_id,
-            ev.actor,
-            now,
-            ev.operation,
-            ev.entity_type,
-            ev.entity_id,
-            serde_json::to_string(ev.payload).unwrap(),
-            previous,
-            content_hash,
-            now
+            event.event_id,
+            event.soul_id,
+            event.device_id,
+            event.actor,
+            event.hlc,
+            event.operation,
+            event.entity_type,
+            event.entity_id,
+            event.payload,
+            event.previous_event_hash,
+            event.content_hash,
+            event.hash_version,
+            event.created_at
         ],
     )?;
 
     conn.execute(
         "UPDATE souls SET head_event_hash = ?1 WHERE soul_id = ?2",
-        params![content_hash, ev.soul_id],
+        params![event.content_hash, ev.soul_id],
     )?;
 
-    Ok(content_hash)
+    Ok(event.content_hash)
 }
 
 pub fn update_entity(
@@ -1043,6 +1325,11 @@ pub fn update_entity(
         params![status, next_data, now, entity_id],
     )
     .map_err(|e| e.to_string())?;
+    tx.execute(
+        "UPDATE soul_state SET preview_confirmed = 0 WHERE soul_id = ?1 AND activated = 0",
+        params![soul_id],
+    )
+    .map_err(|e| e.to_string())?;
 
     let operation = match (from, status) {
         ("candidate", "candidate") => "entity.updated",
@@ -1086,6 +1373,7 @@ pub fn create_soul(
     display_name: &str,
     device_id: &str,
 ) -> SqlResult<SoulManifest> {
+    validate_soul_manifest_fields("pending", display_name, device_id).map_err(to_sql_error)?;
     let tx = conn.unchecked_transaction()?;
     let soul_id = format!("soul_{}", Uuid::new_v4());
     let now = Utc::now().to_rfc3339();
@@ -1099,6 +1387,9 @@ pub fn create_soul(
         "INSERT INTO souls (soul_id, display_name, created_at, device_id) VALUES (?1, ?2, ?3, ?4)",
         params![soul_id, display_name, now, device_id],
     )?;
+    if get_meta(&tx, META_ACTIVE_SOUL_ID)?.is_none() {
+        set_meta(&tx, META_ACTIVE_SOUL_ID, &soul_id)?;
+    }
 
     let head = append_event(
         &tx,
@@ -1190,6 +1481,24 @@ pub fn add_entity(
     validate_entity_type_value(entity_type)?;
     validate_status_value(status)?;
     validate_entity_data_json(data)?;
+    if get_soul(conn, soul_id)
+        .map_err(|e| e.to_string())?
+        .is_none()
+    {
+        return Err("SOUL not found.".to_string());
+    }
+    let count: i64 = conn
+        .query_row(
+            "SELECT COUNT(*) FROM entities WHERE soul_id = ?1",
+            params![soul_id],
+            |r| r.get(0),
+        )
+        .map_err(|e| e.to_string())?;
+    if count >= MAX_ENTITIES_PER_SOUL as i64 {
+        return Err(format!(
+            "Too many entities for this SOUL (limit {MAX_ENTITIES_PER_SOUL})."
+        ));
+    }
 
     if let Some(dedup_key) = dedup_key_for(data) {
         if let Some(existing) =
@@ -1208,6 +1517,11 @@ pub fn add_entity(
         "INSERT INTO entities (id, soul_id, entity_type, status, data, dedup_key, created_at, updated_at)
          VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
         params![id, soul_id, entity_type, status, data, dedup_key, now.clone(), now.clone()],
+    )
+    .map_err(|e| e.to_string())?;
+    tx.execute(
+        "UPDATE soul_state SET preview_confirmed = 0 WHERE soul_id = ?1 AND activated = 0",
+        params![soul_id],
     )
     .map_err(|e| e.to_string())?;
 
@@ -1256,7 +1570,7 @@ pub fn add_entity(
 #[allow(dead_code)]
 pub fn list_events(conn: &Connection, soul_id: &str) -> SqlResult<Vec<SoulEvent>> {
     let mut stmt = conn.prepare(
-        "SELECT event_id, soul_id, device_id, actor, hlc, operation, entity_type, entity_id, payload, provenance_ids, previous_event_hash, content_hash, signature, created_at
+        "SELECT event_id, soul_id, device_id, actor, hlc, operation, entity_type, entity_id, payload, provenance_ids, previous_event_hash, content_hash, hash_version, signature, created_at
          FROM events WHERE soul_id = ?1 ORDER BY created_at ASC",
     )?;
 
@@ -1275,8 +1589,9 @@ pub fn list_events(conn: &Connection, soul_id: &str) -> SqlResult<Vec<SoulEvent>
             provenance_ids: serde_json::from_str(&provenance_str).unwrap_or_default(),
             previous_event_hash: row.get(10)?,
             content_hash: row.get(11)?,
-            signature: row.get(12)?,
-            created_at: row.get(13)?,
+            hash_version: row.get(12)?,
+            signature: row.get(13)?,
+            created_at: row.get(14)?,
         })
     })?;
 
@@ -1290,10 +1605,10 @@ pub fn list_events(conn: &Connection, soul_id: &str) -> SqlResult<Vec<SoulEvent>
 pub fn list_entities(conn: &Connection, soul_id: &str) -> SqlResult<Vec<EntityRow>> {
     let mut stmt = conn.prepare(
         "SELECT id, soul_id, entity_type, status, data, created_at, updated_at
-         FROM entities WHERE soul_id = ?1 ORDER BY created_at DESC",
+         FROM entities WHERE soul_id = ?1 ORDER BY created_at DESC LIMIT ?2",
     )?;
 
-    let rows = stmt.query_map(params![soul_id], |row| {
+    let rows = stmt.query_map(params![soul_id, MAX_LIST_ENTITIES as i64], |row| {
         Ok(EntityRow {
             id: row.get(0)?,
             soul_id: row.get(1)?,
@@ -1973,14 +2288,69 @@ mod tests {
                 calibration_step INTEGER NOT NULL DEFAULT 0,
                 calibration_answers TEXT NOT NULL DEFAULT '[]'
             );
+            CREATE TABLE meta (
+                key TEXT PRIMARY KEY,
+                value TEXT NOT NULL
+            );
             INSERT INTO souls (soul_id, display_name, created_at, device_id)
                 VALUES ('soul_old', 'Старый', '2026-07-01T00:00:00Z', 'device_old');
             INSERT INTO entities (id, soul_id, entity_type, status, data, created_at, updated_at)
                 VALUES ('ent_old', 'soul_old', 'preference', 'active', '{"claim":"old"}', '2026-07-01T00:00:00Z', '2026-07-01T00:00:00Z');
             INSERT INTO soul_state (soul_id, activated)
-                VALUES ('soul_old', 1);"#,
+                VALUES ('soul_old', 1);
+            INSERT INTO meta (key, value) VALUES
+                ('custom_meta', 'kept'),
+                ('imported_content_hash', 'obsolete'),
+                ('imported_soul_id', 'soul_old'),
+                ('imported_state_revision', '7');"#,
         )
         .unwrap();
+        crate::eval::init_evaluations(&old).unwrap();
+        crate::policy::init_policies(&old).unwrap();
+        crate::gateway::init_gateway(&old).unwrap();
+        old.execute_batch(
+            r#"INSERT INTO evaluations (
+                    id, soul_id, scenario_id, scenario_text, domain, soul_variant,
+                    soul_answer, baseline_answer, created_at
+                ) VALUES (
+                    'eval_old', 'soul_old', 'scenario_old', 'Scenario', 'writing',
+                    'a', 'SOUL answer', 'Baseline answer', '2026-07-01T00:00:00Z'
+                );
+                INSERT INTO policies (id, priority, enabled, rule_json, created_at, updated_at)
+                VALUES (
+                    'policy_old', 500, 1, '{"id":"policy_old","effect":"allow"}',
+                    '2026-07-01T00:00:00Z', '2026-07-01T00:00:00Z'
+                );
+                INSERT INTO capabilities (
+                    id, action_id, kind, payload_hash, nonce, action_json, expires_at,
+                    created_at, connector_id, account_id, environment, decision_effect
+                ) VALUES (
+                    'cap_old', 'action_old', 'message.send', 'hash', 'nonce_old', '{}',
+                    '2026-07-02T00:00:00Z', '2026-07-01T00:00:00Z',
+                    'connector_old', 'account_old', 'sandbox', 'allow'
+                );
+                INSERT INTO gateway_receipts (
+                    id, capability_id, action_id, kind, status, decision_effect,
+                    connector_executed, created_at
+                ) VALUES (
+                    'receipt_old', 'cap_old', 'action_old', 'message.send', 'pending',
+                    'allow', 0, '2026-07-01T00:00:00Z'
+                );
+                INSERT OR REPLACE INTO gateway_connectors
+                    (connector_id, account_id, environment)
+                VALUES ('connector_old', 'account_old', 'sandbox');
+                INSERT OR REPLACE INTO gateway_meta (key, value)
+                VALUES ('custom_gateway_meta', 'kept');"#,
+        )
+        .unwrap();
+        init_fts(&old).unwrap();
+        assert!(old
+            .query_row(
+                "SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE name = 'entity_fts_data')",
+                [],
+                |row| row.get::<_, bool>(0),
+            )
+            .unwrap());
         drop(old);
 
         let conn = init_db(&dir).unwrap();
@@ -2008,10 +2378,90 @@ mod tests {
         assert_eq!(list_entities(&conn, "soul_old").unwrap().len(), 1);
         assert!(is_soul_activated(&conn, "soul_old").unwrap());
         assert!(!get_soul_state(&conn, "soul_old").unwrap().3);
+        assert_eq!(
+            get_meta(&conn, "custom_meta").unwrap().as_deref(),
+            Some("kept")
+        );
+        assert!(get_meta(&conn, "imported_content_hash").unwrap().is_none());
+        assert_eq!(
+            conn.query_row(
+                "SELECT COUNT(*) FROM evaluations WHERE id = 'eval_old'",
+                [],
+                |row| row.get::<_, i64>(0),
+            )
+            .unwrap(),
+            1
+        );
+        assert_eq!(
+            conn.query_row(
+                "SELECT COUNT(*) FROM policies WHERE id = 'policy_old'",
+                [],
+                |row| row.get::<_, i64>(0),
+            )
+            .unwrap(),
+            1
+        );
+        assert_eq!(
+            conn.query_row(
+                "SELECT COUNT(*) FROM capabilities WHERE id = 'cap_old'",
+                [],
+                |row| row.get::<_, i64>(0),
+            )
+            .unwrap(),
+            1
+        );
+        assert_eq!(
+            conn.query_row(
+                "SELECT COUNT(*) FROM gateway_receipts WHERE id = 'receipt_old'",
+                [],
+                |row| row.get::<_, i64>(0),
+            )
+            .unwrap(),
+            1
+        );
+        assert_eq!(
+            conn.query_row(
+                "SELECT COUNT(*) FROM gateway_connectors WHERE connector_id = 'connector_old'",
+                [],
+                |row| row.get::<_, i64>(0),
+            )
+            .unwrap(),
+            1
+        );
+        assert_eq!(
+            conn.query_row(
+                "SELECT value FROM gateway_meta WHERE key = 'custom_gateway_meta'",
+                [],
+                |row| row.get::<_, String>(0),
+            )
+            .unwrap(),
+            "kept"
+        );
+        let (fts_rows, _) = search_entities(&conn, "soul_old", "old", 10).unwrap();
+        assert_eq!(fts_rows.len(), 1);
 
         init_db(&dir).unwrap();
 
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn startup_recovers_completed_encrypted_migration_swap() {
+        let dir = std::env::temp_dir().join(format!("soul-db-recovery-{}", Uuid::new_v4()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let conn = init_db(&dir).unwrap();
+        let soul = create_soul(&conn, "Recovery", "device_r").unwrap();
+        conn.execute_batch("PRAGMA wal_checkpoint(TRUNCATE);")
+            .unwrap();
+        drop(conn);
+
+        std::fs::rename(dir.join("soul.db"), dir.join("soul.new")).unwrap();
+        let recovered = init_db(&dir).unwrap();
+        assert!(get_soul(&recovered, &soul.soul_id).unwrap().is_some());
+        assert!(dir.join("soul.db").exists());
+        assert!(!dir.join("soul.new").exists());
+        drop(recovered);
+        let _ = std::fs::remove_dir_all(dir);
     }
 
     #[test]
@@ -2215,6 +2665,7 @@ mod tests {
 
         let mut with_boundary = ids.clone();
         with_boundary.push(boundary.id.clone());
+        confirm_soul_preview(&env.conn, &soul_id, "device_t").unwrap();
         let err = activate_preview(&env.conn, &soul_id, &with_boundary, "device_t").unwrap_err();
         assert!(
             err.contains("cannot be activated by preview confirmation"),
@@ -2255,6 +2706,7 @@ mod tests {
         .unwrap();
 
         ids.push(sensitive.id.clone());
+        confirm_soul_preview(&env.conn, &soul_id, "device_t").unwrap();
         let err = activate_preview(&env.conn, &soul_id, &ids, "device_t").unwrap_err();
         assert!(
             err.contains("cannot be activated by preview confirmation"),
@@ -2329,6 +2781,7 @@ mod tests {
 
         let mut with_rejected = ids.clone();
         with_rejected.push(rejected.id);
+        confirm_soul_preview(&env.conn, &soul_id, "device_t").unwrap();
         let err = activate_preview(&env.conn, &soul_id, &with_rejected, "device_t").unwrap_err();
         assert!(
             err.contains("cannot be activated by preview confirmation"),
@@ -2342,6 +2795,7 @@ mod tests {
         let env = TestEnv::new();
         let (soul_id, ids) = preview_seed(&env);
         update_entity(&env.conn, &soul_id, &ids[0], "active", None, "device_t").unwrap();
+        confirm_soul_preview(&env.conn, &soul_id, "device_t").unwrap();
 
         activate_preview(&env.conn, &soul_id, &ids, "device_t").unwrap();
 

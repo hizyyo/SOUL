@@ -1,4 +1,4 @@
-import { useState, useCallback } from 'react';
+import { useState, useCallback, useRef } from 'react';
 import {
   CALIBRATION_STEPS,
   TOTAL_STEPS,
@@ -10,9 +10,10 @@ interface CalibrationProps {
   soulId: string;
   initialStep: number;
   initialAnswers: CalibrationAnswer[];
-  onSave: (step: number, answers: CalibrationAnswer[]) => void;
-  onComplete: (answers: CalibrationAnswer[]) => void;
+  onSave: (step: number, answers: CalibrationAnswer[]) => Promise<void>;
+  onComplete: (answers: CalibrationAnswer[]) => Promise<void>;
   onBack: () => void;
+  globallyBusy: boolean;
 }
 
 export function Calibration({
@@ -21,10 +22,14 @@ export function Calibration({
   onSave,
   onComplete,
   onBack,
+  globallyBusy,
 }: CalibrationProps) {
   const [stepIdx, setStepIdx] = useState(initialStep);
   const [answers, setAnswers] = useState<CalibrationAnswer[]>(initialAnswers);
   const [saving, setSaving] = useState(false);
+  const submitLockedRef = useRef(false);
+  const stepRef = useRef(stepIdx);
+  stepRef.current = stepIdx;
 
   const getAnswer = useCallback(
     (qid: string) => {
@@ -51,22 +56,35 @@ export function Calibration({
   }
 
   const handleNext = async () => {
+    if (submitLockedRef.current) return;
+    const submittedStep = stepIdx;
+    const submittedAnswers = answers;
+    submitLockedRef.current = true;
     setSaving(true);
     try {
-      await onSave(stepIdx + 1, answers);
-      setSaving(false);
+      await onSave(submittedStep + 1, submittedAnswers);
     } catch {
       setSaving(false);
+      submitLockedRef.current = false;
       return;
     }
-    if (stepIdx < TOTAL_STEPS - 1) {
-      setStepIdx(stepIdx + 1);
+    if (stepRef.current !== submittedStep) return;
+    if (submittedStep < TOTAL_STEPS - 1) {
+      setStepIdx(submittedStep + 1);
+      setSaving(false);
+      submitLockedRef.current = false;
     } else {
-      onComplete(answers);
+      try {
+        await onComplete(submittedAnswers);
+      } catch {
+        setSaving(false);
+        submitLockedRef.current = false;
+      }
     }
   };
 
   const handleBack = () => {
+    if (saving || globallyBusy) return;
     if (stepIdx > 0) {
       setStepIdx(stepIdx - 1);
     } else {
@@ -85,6 +103,7 @@ export function Calibration({
 
   return (
     <div>
+      <h2 style={{ margin: '0 0 12px' }}>Calibrate your SOUL</h2>
       <div style={{ marginBottom: '16px' }}>
         <div style={{ fontSize: '12px', color: '#888', marginBottom: '4px' }}>
           Step {stepIdx + 1} of {TOTAL_STEPS} — {currentStep.title}
@@ -109,6 +128,7 @@ export function Calibration({
             question={q}
             answer={getAnswer(q.id)}
             onAnswer={(v) => setAnswer(q.id, v)}
+            disabled={saving || globallyBusy}
           />
         ))}
       </div>
@@ -116,13 +136,13 @@ export function Calibration({
       <div
         style={{ marginTop: '20px', display: 'flex', gap: '8px', justifyContent: 'space-between' }}
       >
-        <button onClick={handleBack} style={secondaryBtnStyle}>
+        <button onClick={handleBack} disabled={saving || globallyBusy} style={secondaryBtnStyle}>
           {stepIdx === 0 ? 'Back' : 'Previous'}
         </button>
         <button
           onClick={handleNext}
-          disabled={!allAnswered || saving}
-          style={{ ...primaryBtnStyle, opacity: allAnswered && !saving ? 1 : 0.5 }}
+          disabled={!allAnswered || saving || globallyBusy}
+          style={{ ...primaryBtnStyle, opacity: allAnswered && !saving && !globallyBusy ? 1 : 0.5 }}
         >
           {saving ? 'Saving...' : stepIdx < TOTAL_STEPS - 1 ? 'Next' : 'Finish'}
         </button>
@@ -135,22 +155,32 @@ function QuestionRow({
   question,
   answer,
   onAnswer,
+  disabled,
 }: {
   question: CalibrationQuestion;
   answer: CalibrationAnswer | undefined;
   onAnswer: (v: string | string[]) => void;
+  disabled: boolean;
 }) {
   const val = answer?.value ?? '';
 
   if (question.type === 'binary' && question.options) {
     return (
       <div style={{ padding: '12px', border: '1px solid #e5e7eb', borderRadius: '8px' }}>
-        <p style={{ margin: '0 0 8px', fontWeight: 500 }}>{question.prompt}</p>
-        <div style={{ display: 'flex', gap: '8px' }}>
+        <p id={`${question.id}-label`} style={{ margin: '0 0 8px', fontWeight: 500 }}>
+          {question.prompt}
+        </p>
+        <div
+          role="group"
+          aria-labelledby={`${question.id}-label`}
+          style={{ display: 'flex', gap: '8px' }}
+        >
           {question.options.map((opt) => (
             <button
               key={opt}
               onClick={() => onAnswer(opt)}
+              disabled={disabled}
+              aria-pressed={val === opt}
               style={{
                 padding: '6px 16px',
                 borderRadius: '6px',
@@ -176,8 +206,14 @@ function QuestionRow({
     };
     return (
       <div style={{ padding: '12px', border: '1px solid #e5e7eb', borderRadius: '8px' }}>
-        <p style={{ margin: '0 0 8px', fontWeight: 500 }}>{question.prompt}</p>
-        <div style={{ display: 'flex', flexDirection: 'column', gap: '4px' }}>
+        <p id={`${question.id}-label`} style={{ margin: '0 0 8px', fontWeight: 500 }}>
+          {question.prompt}
+        </p>
+        <div
+          role="group"
+          aria-labelledby={`${question.id}-label`}
+          style={{ display: 'flex', flexDirection: 'column', gap: '4px' }}
+        >
           {question.options.map((opt) => {
             const isSel = selected.includes(opt);
             return (
@@ -185,7 +221,12 @@ function QuestionRow({
                 key={opt}
                 style={{ display: 'flex', alignItems: 'center', gap: '8px', cursor: 'pointer' }}
               >
-                <input type="checkbox" checked={isSel} onChange={() => toggle(opt)} />
+                <input
+                  type="checkbox"
+                  checked={isSel}
+                  disabled={disabled}
+                  onChange={() => toggle(opt)}
+                />
                 {opt}
               </label>
             );
@@ -198,15 +239,20 @@ function QuestionRow({
   if (question.type === 'text' || question.type === 'writing') {
     return (
       <div style={{ padding: '12px', border: '1px solid #e5e7eb', borderRadius: '8px' }}>
-        <p style={{ margin: '0 0 8px', fontWeight: 500 }}>
+        <label
+          htmlFor={`${question.id}-answer`}
+          style={{ display: 'block', margin: '0 0 8px', fontWeight: 500 }}
+        >
           {question.prompt}
           {question.optional && (
             <span style={{ color: '#888', fontWeight: 400, fontSize: '12px' }}> (optional)</span>
           )}
-        </p>
+        </label>
         <textarea
+          id={`${question.id}-answer`}
           value={typeof val === 'string' ? val : ''}
           onChange={(e) => onAnswer(e.target.value)}
+          disabled={disabled}
           style={{
             width: '100%',
             minHeight: '60px',

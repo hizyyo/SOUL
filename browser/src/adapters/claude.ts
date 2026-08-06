@@ -2,7 +2,8 @@
  * Адаптер Claude Web (claude.ai), разметка v1.
  */
 
-import type { AdapterEvent, HealthReport, Page, SiteAdapter } from './types';
+import { probeAdapter } from './probe';
+import type { AdapterEvent, SiteAdapter } from './types';
 
 export const claudeAdapter: SiteAdapter = {
   id: 'claude',
@@ -15,27 +16,11 @@ export const claudeAdapter: SiteAdapter = {
   sendSelector: 'button[aria-label="Send message"]',
   mountSelector: 'form[data-testid="chat-input-form"]',
   historySelector: 'div[data-testid="chat-history"]',
+  userMessageSelector: '[data-testid="user-message"]',
   inputKind: 'contenteditable',
 
-  probe(page: Page): HealthReport {
-    const input = page.querySelector('div[contenteditable="true"].ProseMirror');
-    const send = page.querySelector('button[aria-label="Send message"]');
-    const mount = page.querySelector('form[data-testid="chat-input-form"]');
-    const missing = [
-      ...(input ? [] : ['div[contenteditable="true"].ProseMirror']),
-      ...(send ? [] : ['button[aria-label="Send message"]']),
-      ...(mount ? [] : ['form[data-testid="chat-input-form"]']),
-    ];
-    return {
-      status: missing.length === 0 ? 'ok' : 'failed',
-      missing,
-      checked: [
-        'div[contenteditable="true"].ProseMirror',
-        'button[aria-label="Send message"]',
-        'form[data-testid="chat-input-form"]',
-      ],
-      at: Date.now(),
-    };
+  probe(page) {
+    return probeAdapter(this, page, { inputTag: 'DIV', mountTag: 'FORM' });
   },
 
   isSendEvent(event: AdapterEvent): boolean {

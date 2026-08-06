@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useState, type CSSProperties } from 'react';
+import { useCallback, useEffect, useRef, useState, type CSSProperties } from 'react';
 import {
   POLICY_PRESETS,
   presetById,
@@ -12,6 +12,9 @@ import {
 import { EffectBadge } from './PolicyBadges';
 import { GatewaySection } from './GatewaySection';
 import { safeErrorMessage } from '../data/safeError';
+import { Modal } from '../components/Modal';
+import { useGlobalMutation } from '../data/useMutation';
+import { createLatestRequestGate } from '../data/mutations';
 
 declare global {
   interface Window {
@@ -83,6 +86,11 @@ export function Policies() {
   const [rows, setRows] = useState<PolicyRow[]>([]);
   const [loadError, setLoadError] = useState<string | null>(null);
   const [busyId, setBusyId] = useState<string | null>(null);
+  const [deleteTarget, setDeleteTarget] = useState<PolicyRow | null>(null);
+  const [deleteError, setDeleteError] = useState<string | null>(null);
+  const { activeKey, run: runMutation } = useGlobalMutation();
+  const globallyBusy = activeKey !== null;
+  const loadGateRef = useRef(createLatestRequestGate());
 
   const [presetId, setPresetId] = useState(POLICY_PRESETS[0]?.id ?? '');
   const [ruleJson, setRuleJson] = useState(POLICY_PRESETS[0]?.build() ?? '');
@@ -94,11 +102,14 @@ export function Policies() {
   const [evalError, setEvalError] = useState<string | null>(null);
 
   const load = useCallback(async () => {
+    const request = loadGateRef.current.begin();
     try {
-      setRows(await invoke<PolicyRow[]>('list_policies_cmd'));
+      const nextRows = await invoke<PolicyRow[]>('list_policies_cmd');
+      if (!request.isCurrent()) return;
+      setRows(nextRows);
       setLoadError(null);
     } catch {
-      setLoadError(safeErrorMessage('загрузить политики'));
+      if (request.isCurrent()) setLoadError(safeErrorMessage('загрузить политики'));
     }
   }, []);
 
@@ -122,42 +133,54 @@ export function Policies() {
       setCreateError(state.error ?? 'Invalid rule.');
       return;
     }
-    try {
-      await invoke<PolicyRow>('create_policy_cmd', { ruleJson });
-      setCreateOk('Rule created.');
-      await load();
-    } catch {
-      setCreateError(safeErrorMessage('создать правило'));
-    }
+    await runMutation('policy:create', async () => {
+      try {
+        const created = await invoke<PolicyRow>('create_policy_cmd', { ruleJson });
+        setRows((current) => [created, ...current.filter((row) => row.id !== created.id)]);
+        setCreateOk('Rule created.');
+        await load();
+      } catch {
+        setCreateError(safeErrorMessage('создать правило'));
+      }
+    });
   };
 
   const handleToggle = async (row: PolicyRow) => {
-    setBusyId(row.id);
-    setLoadError(null);
-    try {
-      await invoke('set_policy_enabled_cmd', {
-        policyId: row.id,
-        enabled: !row.enabled,
-      });
-      await load();
-    } catch {
-      setLoadError(safeErrorMessage('обновить правило'));
-    } finally {
-      setBusyId(null);
-    }
+    await runMutation(`policy:toggle:${row.id}`, async () => {
+      setBusyId(row.id);
+      setLoadError(null);
+      try {
+        const updated = await invoke<PolicyRow>('set_policy_enabled_cmd', {
+          policyId: row.id,
+          enabled: !row.enabled,
+        });
+        setRows((current) => current.map((item) => (item.id === updated.id ? updated : item)));
+        await load();
+      } catch {
+        setLoadError(safeErrorMessage('обновить правило'));
+      } finally {
+        setBusyId(null);
+      }
+    });
   };
 
-  const handleDelete = async (id: string) => {
-    setBusyId(id);
-    setLoadError(null);
-    try {
-      await invoke('delete_policy_cmd', { policyId: id });
-      await load();
-    } catch {
-      setLoadError(safeErrorMessage('удалить правило'));
-    } finally {
-      setBusyId(null);
-    }
+  const handleDelete = async (row: PolicyRow) => {
+    const result = await runMutation(`policy:delete:${row.id}`, async () => {
+      setBusyId(row.id);
+      setDeleteError(null);
+      try {
+        await invoke('delete_policy_cmd', { policyId: row.id });
+        setRows((current) => current.filter((item) => item.id !== row.id));
+        await load();
+        return true;
+      } catch {
+        setDeleteError(safeErrorMessage('удалить правило'));
+        return false;
+      } finally {
+        setBusyId(null);
+      }
+    });
+    if (result.started && result.value) setDeleteTarget(null);
   };
 
   const handleEvaluate = async () => {
@@ -179,7 +202,10 @@ export function Policies() {
       </p>
 
       {loadError && (
-        <div style={{ ...CARD, borderColor: '#fecaca', background: '#fef2f2', color: '#dc2626' }}>
+        <div
+          role="alert"
+          style={{ ...CARD, borderColor: '#fecaca', background: '#fef2f2', color: '#dc2626' }}
+        >
           {loadError}
         </div>
       )}
@@ -187,7 +213,11 @@ export function Policies() {
       <div style={CARD}>
         <div style={{ ...LABEL, fontSize: '14px' }}>Новое правило</div>
         <div style={{ marginBottom: '8px' }}>
+          <label htmlFor="policy-preset" style={LABEL}>
+            Preset
+          </label>
           <select
+            id="policy-preset"
             value={presetId}
             onChange={(e) => applyPreset(e.target.value)}
             style={{ ...INPUT, maxWidth: '340px' }}
@@ -202,18 +232,26 @@ export function Policies() {
             {presetById(presetId)?.description}
           </p>
         </div>
+        <label htmlFor="policy-rule-json" style={LABEL}>
+          Rule JSON
+        </label>
         <textarea
+          id="policy-rule-json"
           value={ruleJson}
           onChange={(e) => setRuleJson(e.target.value)}
           style={TEXTAREA}
           spellCheck={false}
         />
         <div style={{ marginTop: '8px', display: 'flex', gap: '8px', alignItems: 'center' }}>
-          <button onClick={() => void handleCreate()} style={BTN}>
+          <button onClick={() => void handleCreate()} style={BTN} disabled={globallyBusy}>
             Create
           </button>
           {createOk && <span style={{ fontSize: '13px', color: '#047857' }}>{createOk}</span>}
-          {createError && <span style={{ fontSize: '13px', color: '#dc2626' }}>{createError}</span>}
+          {createError && (
+            <span role="alert" style={{ fontSize: '13px', color: '#dc2626' }}>
+              {createError}
+            </span>
+          )}
         </div>
       </div>
 
@@ -243,7 +281,7 @@ export function Policies() {
                     alignItems: 'center',
                   }}
                 >
-                  {row.id}
+                  <span style={{ minWidth: 0, overflowWrap: 'anywhere' }}>{row.id}</span>
                   {effect && <EffectBadge effect={effect} />}
                 </div>
                 <div style={{ fontSize: '12px', color: '#888' }}>
@@ -256,15 +294,18 @@ export function Policies() {
                 <input
                   type="checkbox"
                   checked={row.enabled}
-                  disabled={busyId === row.id}
+                  disabled={globallyBusy || busyId === row.id}
                   onChange={() => void handleToggle(row)}
                 />
                 active
               </label>
               <button
-                onClick={() => void handleDelete(row.id)}
+                onClick={() => {
+                  setDeleteError(null);
+                  setDeleteTarget(row);
+                }}
                 style={{ ...BTN_DANGER, opacity: busyId === row.id ? 0.5 : 1 }}
-                disabled={busyId === row.id}
+                disabled={globallyBusy || busyId === row.id}
               >
                 Delete
               </button>
@@ -279,17 +320,25 @@ export function Policies() {
           Пример: покупка на $600 в production — правило high-value должно потребовать
           подтверждение, необратимость без подтверждения — запрет.
         </p>
+        <label htmlFor="policy-action-json" style={LABEL}>
+          Action JSON
+        </label>
         <textarea
+          id="policy-action-json"
           value={actionJson}
           onChange={(e) => setActionJson(e.target.value)}
           style={{ ...TEXTAREA, minHeight: '200px' }}
           spellCheck={false}
         />
         <div style={{ marginTop: '8px', display: 'flex', gap: '8px', alignItems: 'center' }}>
-          <button onClick={() => void handleEvaluate()} style={BTN}>
+          <button onClick={() => void handleEvaluate()} style={BTN} disabled={globallyBusy}>
             Evaluate
           </button>
-          {evalError && <span style={{ fontSize: '13px', color: '#dc2626' }}>{evalError}</span>}
+          {evalError && (
+            <span role="alert" style={{ fontSize: '13px', color: '#dc2626' }}>
+              {evalError}
+            </span>
+          )}
         </div>
         {decision && (
           <div
@@ -324,6 +373,43 @@ export function Policies() {
 
       <h3 style={{ marginBottom: 8 }}>Имитированный Gateway (§4.11)</h3>
       <GatewaySection />
+
+      {deleteTarget && (
+        <Modal
+          title="Delete policy?"
+          onClose={() => setDeleteTarget(null)}
+          closeOnBackdrop={!globallyBusy}
+          closeOnEscape={!globallyBusy}
+          ariaDescribedBy={deleteError ? 'policy-delete-error' : 'policy-delete-description'}
+          titleStyle={{ color: '#b91c1c' }}
+        >
+          <p id="policy-delete-description" style={{ fontSize: '13px', color: '#4b5563' }}>
+            Delete <code>{deleteTarget.id}</code>? This removes the rule immediately. Recreate it
+            from its preset or JSON if you need it again.
+          </p>
+          {deleteError && (
+            <p id="policy-delete-error" role="alert" style={{ color: '#b91c1c', fontSize: '13px' }}>
+              {deleteError}
+            </p>
+          )}
+          <div style={{ display: 'flex', justifyContent: 'flex-end', gap: '8px' }}>
+            <button
+              onClick={() => setDeleteTarget(null)}
+              disabled={globallyBusy}
+              style={{ ...BTN, background: '#f3f4f6', color: '#374151' }}
+            >
+              Cancel
+            </button>
+            <button
+              onClick={() => void handleDelete(deleteTarget)}
+              disabled={globallyBusy}
+              style={BTN_DANGER}
+            >
+              {busyId === deleteTarget.id ? 'Deleting...' : 'Delete policy'}
+            </button>
+          </div>
+        </Modal>
+      )}
     </div>
   );
 }

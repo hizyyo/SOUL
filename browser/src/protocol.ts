@@ -4,8 +4,10 @@
  */
 
 import {
+  CONTEXT_POLICY_VERSION,
   EXTENSION_ID,
   MAX_FRAME_BYTES,
+  MAX_PACK_CHARS,
   MAX_TASK_CHARS,
   MAX_TOKENS,
   PROTOCOL_VERSION,
@@ -35,16 +37,20 @@ export type OutgoingRequest = PingRequest | GetContextRequest;
 export interface PongResponse {
   type: 'soul.pong';
   protocol: string;
-  extensionId: string;
   nonce: string;
+  ok: true;
 }
 
 export interface ContextResponse {
   type: 'soul.context';
+  protocol: string;
+  nonce: string;
+  ok: true;
   pack: string;
   entityCount: number;
   tokenEstimate: number;
-  /** 8 hex-символов: версия policy-кодекса (host шлёт строкой, см. context.rs). */
+  costEstimateUsd: number;
+  /** Версия policy-кодекса host-а. */
   policyVersion: string;
   /** 8 hex-символов: хэш состояния БД (host шлёт строкой, см. context.rs). */
   stateVersion: string;
@@ -55,6 +61,9 @@ export interface ErrorResponse {
   type: 'soul.error';
   code: string;
   message: string;
+  protocol?: string;
+  nonce?: string | null;
+  ok?: false;
 }
 
 export type BridgeIncoming = PongResponse | ContextResponse | ErrorResponse;
@@ -73,16 +82,90 @@ export function isErrorResponse(value: unknown): value is ErrorResponse {
   );
 }
 
-export function isContextResponse(value: unknown): value is ContextResponse {
+export function isContextResponse(
+  value: unknown,
+  expectedNonce?: string,
+): value is ContextResponse {
+  if (!isRecord(value) || value.type !== 'soul.context') {
+    return false;
+  }
+  const nonce = value.nonce;
+  const pack = value.pack;
+  const entityCount = value.entityCount;
+  const tokenEstimate = value.tokenEstimate;
+  const maxTokens = value.maxTokens;
+  const costEstimateUsd = value.costEstimateUsd;
   return (
-    typeof value === 'object' &&
-    value !== null &&
-    (value as { type?: unknown }).type === 'soul.context' &&
-    typeof (value as { pack?: unknown }).pack === 'string' &&
-    typeof (value as { entityCount?: unknown }).entityCount === 'number' &&
-    typeof (value as { policyVersion?: unknown }).policyVersion === 'string' &&
-    typeof (value as { stateVersion?: unknown }).stateVersion === 'string'
+    hasOnlyKeys(value, [
+      'type',
+      'protocol',
+      'nonce',
+      'ok',
+      'pack',
+      'entityCount',
+      'tokenEstimate',
+      'costEstimateUsd',
+      'policyVersion',
+      'stateVersion',
+      'maxTokens',
+    ]) &&
+    value.protocol === PROTOCOL_VERSION &&
+    value.ok === true &&
+    typeof nonce === 'string' &&
+    isValidNonce(nonce) &&
+    (expectedNonce === undefined || nonce === expectedNonce) &&
+    typeof pack === 'string' &&
+    characterCount(pack) > 0 &&
+    characterCount(pack) <= MAX_PACK_CHARS &&
+    utf8ByteLength(pack) <= MAX_FRAME_BYTES &&
+    isIntegerInRange(entityCount, 0, MAX_PACK_CHARS) &&
+    isIntegerInRange(maxTokens, 1, MAX_TOKENS) &&
+    isIntegerInRange(tokenEstimate, 0, maxTokens) &&
+    typeof costEstimateUsd === 'number' &&
+    Number.isFinite(costEstimateUsd) &&
+    costEstimateUsd >= 0 &&
+    costEstimateUsd <= MAX_TOKENS &&
+    value.policyVersion === CONTEXT_POLICY_VERSION &&
+    typeof value.stateVersion === 'string' &&
+    /^[0-9a-f]{8}$/.test(value.stateVersion) &&
+    serializedByteLength(value) <= MAX_FRAME_BYTES
   );
+}
+
+/** Валидирует ответ native host-а и привязывает его к ожидаемому nonce. */
+export function validateNativeResponse(
+  value: unknown,
+  expectedNonce: string,
+): BridgeIncoming | null {
+  if (isContextResponse(value, expectedNonce)) {
+    return value;
+  }
+  if (!isRecord(value) || value.protocol !== PROTOCOL_VERSION || value.nonce !== expectedNonce) {
+    return null;
+  }
+  if (!isValidNonce(expectedNonce) || serializedByteLength(value) > MAX_FRAME_BYTES) {
+    return null;
+  }
+  if (
+    value.type === 'soul.pong' &&
+    value.ok === true &&
+    hasOnlyKeys(value, ['type', 'protocol', 'nonce', 'ok'])
+  ) {
+    return value as unknown as PongResponse;
+  }
+  if (
+    value.type === 'soul.error' &&
+    value.ok === false &&
+    hasOnlyKeys(value, ['type', 'protocol', 'nonce', 'ok', 'code', 'message']) &&
+    typeof value.code === 'string' &&
+    value.code.length > 0 &&
+    value.code.length <= 64 &&
+    typeof value.message === 'string' &&
+    characterCount(value.message) <= 2000
+  ) {
+    return value as unknown as ErrorResponse;
+  }
+  return null;
 }
 
 export type ValidationResult =
@@ -95,6 +178,35 @@ export type ValidationResult =
  */
 export function isTrustedSender(sender: { readonly id?: unknown } | undefined | null): boolean {
   return sender?.id === EXTENSION_ID;
+}
+
+/** Привязывает context-запрос к реальной странице, вызвавшей content script. */
+export function isTrustedSenderForRequest(
+  sender:
+    | { readonly id?: unknown; readonly url?: unknown; readonly origin?: unknown }
+    | undefined
+    | null,
+  request: OutgoingRequest,
+): boolean {
+  if (!isTrustedSender(sender)) {
+    return false;
+  }
+  if (request.type !== 'soul.get_context') {
+    return true;
+  }
+  if (typeof sender?.url !== 'string' || sender.url.startsWith('chrome-extension://')) {
+    return false;
+  }
+  let urlOrigin: string;
+  try {
+    urlOrigin = new URL(sender.url).origin;
+  } catch {
+    return false;
+  }
+  if (urlOrigin !== request.origin) {
+    return false;
+  }
+  return sender.origin === undefined || sender.origin === request.origin;
 }
 
 /** Отклоняет запрос по правилам host-а (fail-closed до отправки). */
@@ -132,7 +244,7 @@ export function validateOutgoingRequest(message: unknown): ValidationResult {
       );
     }
     const task = m.task;
-    if (typeof task !== 'string' || task.length > MAX_TASK_CHARS) {
+    if (typeof task !== 'string' || characterCount(task) > MAX_TASK_CHARS) {
       return fail('task_too_long', `Текст задачи превышает ${MAX_TASK_CHARS} символов.`);
     }
     const maxTokens = m.maxTokens;
@@ -153,7 +265,7 @@ export function validateOutgoingRequest(message: unknown): ValidationResult {
       task,
       maxTokens,
     };
-    if (JSON.stringify(m).length > MAX_FRAME_BYTES) {
+    if (serializedByteLength(m) > MAX_FRAME_BYTES) {
       return fail('request_too_large', 'Запрос превышает максимальный размер сообщения.');
     }
     return { ok: true, request };
@@ -163,4 +275,33 @@ export function validateOutgoingRequest(message: unknown): ValidationResult {
 
 function fail(code: string, message: string): ValidationResult {
   return { ok: false, error: errorResponse(code, message) };
+}
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === 'object' && value !== null;
+}
+
+function isIntegerInRange(value: unknown, min: number, max: number): value is number {
+  return typeof value === 'number' && Number.isInteger(value) && value >= min && value <= max;
+}
+
+function hasOnlyKeys(value: Record<string, unknown>, expected: readonly string[]): boolean {
+  const keys = Object.keys(value);
+  return keys.length === expected.length && keys.every((key) => expected.includes(key));
+}
+
+function characterCount(value: string): number {
+  return Array.from(value).length;
+}
+
+function utf8ByteLength(value: string): number {
+  return new TextEncoder().encode(value).byteLength;
+}
+
+function serializedByteLength(value: unknown): number {
+  try {
+    return utf8ByteLength(JSON.stringify(value));
+  } catch {
+    return Number.POSITIVE_INFINITY;
+  }
 }

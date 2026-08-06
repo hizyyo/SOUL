@@ -13,6 +13,10 @@ fn main() {
             std::process::exit(1);
         }
     };
+    if let Err(e) = soul_lib::mcp::authorize_process(&app_dir) {
+        eprintln!("soul-mcp: {e}");
+        std::process::exit(1);
+    }
     if let Err(e) = soul_lib::mcp::serve_stdio(&app_dir) {
         eprintln!("soul-mcp: {e}");
         std::process::exit(1);

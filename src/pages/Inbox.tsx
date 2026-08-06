@@ -1,4 +1,4 @@
-import { useEffect, useState } from 'react';
+import { useCallback, useState } from 'react';
 import {
   claimOf,
   formatSourceDate,
@@ -8,16 +8,18 @@ import {
   requiresExplicitConfirm,
   type ReviewEntity,
 } from '../data/review';
+import { Modal } from '../components/Modal';
 
 interface InboxProps {
   entities: ReviewEntity[];
-  onConfirm: (id: string) => void;
+  onConfirm: (id: string) => Promise<boolean>;
   onReject: (id: string) => void;
   onEdit: (id: string, claim: string) => void;
   onUndo: (id: string) => void;
   onDismissUndo: () => void;
   lastReview: { entityId: string; action: 'confirmed' | 'rejected' } | null;
-  busyId: string | null;
+  busyIds: ReadonlySet<string>;
+  globallyBusy: boolean;
 }
 
 interface ConfirmTarget {
@@ -32,7 +34,8 @@ export function Inbox({
   onUndo,
   onDismissUndo,
   lastReview,
-  busyId,
+  busyIds,
+  globallyBusy,
 }: InboxProps) {
   const candidates = rankCandidates(entities.filter((e) => e.status === 'candidate'));
   const active = entities
@@ -46,14 +49,21 @@ export function Inbox({
   const [boundaryAck, setBoundaryAck] = useState(false);
   const [editingId, setEditingId] = useState<string | null>(null);
   const [draft, setDraft] = useState('');
+  const [confirmError, setConfirmError] = useState<string | null>(null);
+  const closeConfirm = useCallback(() => {
+    setConfirmTarget(null);
+    setBoundaryAck(false);
+    setConfirmError(null);
+  }, []);
 
   const handleConfirmClick = (e: ReviewEntity) => {
     if (requiresExplicitConfirm(e)) {
       setBoundaryAck(false);
+      setConfirmError(null);
       setConfirmTarget({ entity: e });
       return;
     }
-    onConfirm(e.id);
+    void onConfirm(e.id);
   };
 
   const handleEditStart = (e: ReviewEntity) => {
@@ -72,15 +82,6 @@ export function Inbox({
     onEdit(id, trimmed);
     setEditingId(null);
   };
-
-  useEffect(() => {
-    if (!confirmTarget) return;
-    const onKey = (ev: KeyboardEvent) => {
-      if (ev.key === 'Escape') setConfirmTarget(null);
-    };
-    window.addEventListener('keydown', onKey);
-    return () => window.removeEventListener('keydown', onKey);
-  }, [confirmTarget]);
 
   return (
     <div>
@@ -108,14 +109,14 @@ export function Inbox({
           </span>
           <button
             onClick={() => onUndo(lastReview.entityId)}
-            disabled={busyId === lastReview.entityId}
+            disabled={globallyBusy || busyIds.has(lastReview.entityId)}
             style={{
               marginLeft: 'auto',
               background: '#fff',
               border: '1px solid #93c5fd',
               borderRadius: '6px',
               padding: '4px 12px',
-              cursor: busyId === lastReview.entityId ? 'default' : 'pointer',
+              cursor: globallyBusy || busyIds.has(lastReview.entityId) ? 'default' : 'pointer',
               color: '#1d4ed8',
               fontWeight: 600,
             }}
@@ -157,7 +158,7 @@ export function Inbox({
             <CandidateCard
               key={e.id}
               entity={e}
-              busy={busyId === e.id}
+              busy={globallyBusy || busyIds.has(e.id)}
               editing={editingId === e.id}
               draft={draft}
               onDraftChange={setDraft}
@@ -181,6 +182,7 @@ export function Inbox({
               key={e.id}
               style={{
                 display: 'flex',
+                flexWrap: 'wrap',
                 alignItems: 'center',
                 gap: '8px',
                 padding: '8px 12px',
@@ -206,13 +208,13 @@ export function Inbox({
               </span>
               <button
                 onClick={() => onUndo(e.id)}
-                disabled={busyId === e.id}
+                disabled={globallyBusy || busyIds.has(e.id)}
                 style={{
                   background: '#fff',
                   border: '1px solid #d1d5db',
                   borderRadius: '6px',
                   padding: '4px 10px',
-                  cursor: busyId === e.id ? 'default' : 'pointer',
+                  cursor: globallyBusy || busyIds.has(e.id) ? 'default' : 'pointer',
                   fontSize: '12px',
                 }}
               >
@@ -256,106 +258,107 @@ export function Inbox({
       )}
 
       {confirmTarget && (
-        <div
-          style={{
-            position: 'fixed',
-            inset: 0,
-            background: 'rgba(0,0,0,0.4)',
-            display: 'flex',
-            alignItems: 'center',
-            justifyContent: 'center',
-            zIndex: 50,
-            padding: '16px',
-          }}
-          onClick={() => setConfirmTarget(null)}
+        <Modal
+          title="Explicit confirmation"
+          onClose={closeConfirm}
+          closeOnBackdrop={!globallyBusy}
+          closeOnEscape={!globallyBusy}
+          ariaDescribedBy={
+            confirmError
+              ? 'entity-confirm-description entity-confirm-error'
+              : 'entity-confirm-description'
+          }
         >
-          <div
-            role="dialog"
-            aria-modal="true"
-            aria-label="Explicit confirmation"
-            onClick={(ev) => ev.stopPropagation()}
+          <span
             style={{
-              background: '#fff',
-              borderRadius: '10px',
-              padding: '20px',
-              maxWidth: '440px',
-              width: '100%',
+              fontSize: '11px',
+              padding: '2px 8px',
+              borderRadius: '4px',
+              background: '#fef3c7',
+              color: '#b45309',
+              fontWeight: 700,
+              textTransform: 'uppercase',
             }}
           >
-            <span
-              style={{
-                fontSize: '11px',
-                padding: '2px 8px',
-                borderRadius: '4px',
-                background: '#fef3c7',
-                color: '#b45309',
-                fontWeight: 700,
-                textTransform: 'uppercase',
-              }}
+            {confirmTarget.entity.entity_type === 'boundary' ? 'Boundary' : 'Sensitive'}
+          </span>
+          <p style={{ margin: '10px 0', fontWeight: 600, fontSize: '15px' }}>
+            {maskText(claimOf(confirmTarget.entity))}
+          </p>
+          <p
+            id="entity-confirm-description"
+            style={{ fontSize: '13px', color: '#6b7280', margin: '0 0 12px' }}
+          >
+            This is a boundary or sensitive item. It limits what AI can do on your behalf and needs
+            explicit confirmation.
+          </p>
+          <label
+            style={{
+              display: 'flex',
+              gap: '8px',
+              alignItems: 'start',
+              fontSize: '13px',
+              cursor: 'pointer',
+              marginBottom: '16px',
+            }}
+          >
+            <input
+              type="checkbox"
+              checked={boundaryAck}
+              disabled={globallyBusy}
+              onChange={(ev) => setBoundaryAck(ev.target.checked)}
+              autoFocus
+              style={{ marginTop: '2px' }}
+            />
+            <span>I understand this will apply to AI actions.</span>
+          </label>
+          {confirmError && (
+            <p
+              id="entity-confirm-error"
+              role="alert"
+              style={{ color: '#b91c1c', fontSize: '13px' }}
             >
-              {confirmTarget.entity.entity_type === 'boundary' ? 'Boundary' : 'Sensitive'}
-            </span>
-            <p style={{ margin: '10px 0', fontWeight: 600, fontSize: '15px' }}>
-              {maskText(claimOf(confirmTarget.entity))}
+              {confirmError}
             </p>
-            <p style={{ fontSize: '13px', color: '#6b7280', margin: '0 0 12px' }}>
-              This is a boundary or sensitive item. It limits what AI can do on your behalf and
-              needs explicit confirmation.
-            </p>
-            <label
+          )}
+          <div style={{ display: 'flex', gap: '8px', justifyContent: 'flex-end' }}>
+            <button
+              onClick={closeConfirm}
+              disabled={globallyBusy}
               style={{
-                display: 'flex',
-                gap: '8px',
-                alignItems: 'start',
-                fontSize: '13px',
+                padding: '6px 16px',
+                background: '#f3f4f6',
+                border: '1px solid #d1d5db',
+                borderRadius: '6px',
                 cursor: 'pointer',
-                marginBottom: '16px',
               }}
             >
-              <input
-                type="checkbox"
-                checked={boundaryAck}
-                onChange={(ev) => setBoundaryAck(ev.target.checked)}
-                autoFocus
-                style={{ marginTop: '2px' }}
-              />
-              <span>I understand this will apply to AI actions.</span>
-            </label>
-            <div style={{ display: 'flex', gap: '8px', justifyContent: 'flex-end' }}>
-              <button
-                onClick={() => setConfirmTarget(null)}
-                style={{
-                  padding: '6px 16px',
-                  background: '#f3f4f6',
-                  border: '1px solid #d1d5db',
-                  borderRadius: '6px',
-                  cursor: 'pointer',
-                }}
-              >
-                Cancel
-              </button>
-              <button
-                onClick={() => {
-                  onConfirm(confirmTarget.entity.id);
-                  setConfirmTarget(null);
-                }}
-                disabled={!boundaryAck || busyId === confirmTarget.entity.id}
-                style={{
-                  padding: '6px 16px',
-                  background: '#22c55e',
-                  color: '#fff',
-                  border: 'none',
-                  borderRadius: '6px',
-                  cursor: busyId === confirmTarget.entity.id ? 'default' : 'pointer',
-                  fontWeight: 600,
-                  opacity: boundaryAck ? 1 : 0.5,
-                }}
-              >
-                Confirm
-              </button>
-            </div>
+              Cancel
+            </button>
+            <button
+              onClick={async () => {
+                setConfirmError(null);
+                const confirmed = await onConfirm(confirmTarget.entity.id);
+                if (confirmed) closeConfirm();
+                else setConfirmError('The item could not be confirmed. Nothing was changed.');
+              }}
+              disabled={!boundaryAck || globallyBusy || busyIds.has(confirmTarget.entity.id)}
+              style={{
+                padding: '6px 16px',
+                background: '#22c55e',
+                color: '#fff',
+                border: 'none',
+                borderRadius: '6px',
+                cursor:
+                  globallyBusy || busyIds.has(confirmTarget.entity.id) ? 'default' : 'pointer',
+                fontWeight: 600,
+                opacity: boundaryAck ? 1 : 0.5,
+              }}
+            >
+              Confirm
+            </button>
           </div>
-        </div>
+        </Modal>
       )}
     </div>
   );
@@ -426,6 +429,7 @@ function CandidateCard({
               <textarea
                 value={draft}
                 onChange={(ev) => onDraftChange(ev.target.value)}
+                disabled={busy}
                 style={{
                   width: '100%',
                   minHeight: '56px',
@@ -440,6 +444,7 @@ function CandidateCard({
               <div style={{ display: 'flex', gap: '6px', marginTop: '6px' }}>
                 <button
                   onClick={onEditSave}
+                  disabled={busy}
                   style={{
                     padding: '4px 12px',
                     background: '#6366f1',
@@ -454,6 +459,7 @@ function CandidateCard({
                 </button>
                 <button
                   onClick={onEditCancel}
+                  disabled={busy}
                   style={{
                     padding: '4px 12px',
                     background: '#f3f4f6',

@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { tabIndexForKey } from '../src/data/nav';
+import { selectedTabId, tabIndexForKey, tabStopFor } from '../src/data/nav';
 
 describe('tabIndexForKey', () => {
   it('wraps with arrow keys and supports Home/End', () => {
@@ -11,5 +11,21 @@ describe('tabIndexForKey', () => {
 
   it('ignores unrelated keys', () => {
     expect(tabIndexForKey(1, 4, 'Tab')).toBeNull();
+  });
+});
+
+describe('tab selection', () => {
+  it('always leaves exactly one available tab selected and tabbable', () => {
+    const tabs = ['home', 'inbox', 'settings'] as const;
+    const selected = selectedTabId('preview', tabs);
+    expect(selected).toBe('home');
+    expect(tabs.map((tab) => tabStopFor(tab, selected))).toEqual([0, -1, -1]);
+  });
+
+  it('keeps the active tab when it is available', () => {
+    const tabs = ['home', 'preview', 'settings'] as const;
+    const selected = selectedTabId('preview', tabs);
+    expect(selected).toBe('preview');
+    expect(tabs.filter((tab) => tabStopFor(tab, selected) === 0)).toEqual(['preview']);
   });
 });

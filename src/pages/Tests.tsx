@@ -14,7 +14,7 @@ import {
   shareCardText,
   EVAL_RECOMMENDED_ROUNDS,
   SHARE_MIN_ROUNDS,
-  B1_PROFILE_STORAGE_KEY,
+  clearPersistedBaselineProfile,
   type BlindScenario,
   type EvaluationRecord,
   type RevealResult,
@@ -140,13 +140,8 @@ export function Tests({ soul, entities }: Props) {
 
   useEffect(() => {
     const seeded = buildBaselineProfile(entities, 15, 1400);
-    const stored = localStorage.getItem(B1_PROFILE_STORAGE_KEY);
-    if (stored === null) {
-      setB1Profile(seeded);
-      localStorage.setItem(B1_PROFILE_STORAGE_KEY, seeded);
-    } else {
-      setB1Profile(stored);
-    }
+    clearPersistedBaselineProfile(localStorage);
+    setB1Profile(seeded);
   }, [entities]);
 
   useEffect(() => {
@@ -263,7 +258,6 @@ export function Tests({ soul, entities }: Props) {
   const handleResetProfile = () => {
     const seeded = buildBaselineProfile(entities, 15, 1400);
     setB1Profile(seeded);
-    localStorage.setItem(B1_PROFILE_STORAGE_KEY, seeded);
   };
 
   const progress = `Rounds: ${stats.completed} / ${EVAL_RECOMMENDED_ROUNDS}`;
@@ -280,6 +274,7 @@ export function Tests({ soul, entities }: Props) {
 
       {error && (
         <div
+          role="alert"
           style={{
             padding: '8px 12px',
             background: '#fef2f2',
@@ -310,12 +305,14 @@ export function Tests({ soul, entities }: Props) {
           </div>
         </div>
         <div style={{ ...CARD, flex: 1, minWidth: '260px' }}>
-          <div style={LABEL}>Baseline profile (B1)</div>
+          <label htmlFor="baseline-profile" style={LABEL}>
+            Baseline profile (B1; kept in memory only)
+          </label>
           <textarea
+            id="baseline-profile"
             value={b1Profile}
             onChange={(e) => {
               setB1Profile(e.target.value);
-              localStorage.setItem(B1_PROFILE_STORAGE_KEY, e.target.value);
             }}
             rows={4}
             style={{ width: '100%', boxSizing: 'border-box', fontSize: '12px' }}
@@ -469,8 +466,8 @@ export function Tests({ soul, entities }: Props) {
             </div>
           </div>
           <p style={{ fontSize: '12px', color: '#888', marginBottom: '0' }}>
-            Use the same model and settings (default temperature) for both prompts in your AI
-            client, and paste both answers below.
+            For a fairer comparison, use the same AI client and generation settings for both prompts
+            when you can. SOUL does not record or verify the model, provider, or settings.
           </p>
           <button style={{ ...BTN, marginTop: '8px' }} onClick={() => setPhase('answers')}>
             I have both answers →
@@ -483,8 +480,11 @@ export function Tests({ soul, entities }: Props) {
           <strong>Paste both answers</strong>
           <div style={{ display: 'flex', gap: '12px', flexWrap: 'wrap', marginTop: '8px' }}>
             <div style={{ flex: 1, minWidth: '280px' }}>
-              <label style={LABEL}>Answer from Prompt 1 (SOUL context)</label>
+              <label htmlFor="soul-answer" style={LABEL}>
+                Answer from Prompt 1 (SOUL context)
+              </label>
               <textarea
+                id="soul-answer"
                 value={soulAnswer}
                 onChange={(e) => setSoulAnswer(e.target.value)}
                 rows={6}
@@ -492,8 +492,11 @@ export function Tests({ soul, entities }: Props) {
               />
             </div>
             <div style={{ flex: 1, minWidth: '280px' }}>
-              <label style={LABEL}>Answer from Prompt 2 (baseline profile)</label>
+              <label htmlFor="baseline-answer" style={LABEL}>
+                Answer from Prompt 2 (baseline profile)
+              </label>
               <textarea
+                id="baseline-answer"
                 value={baselineAnswer}
                 onChange={(e) => setBaselineAnswer(e.target.value)}
                 rows={6}
@@ -596,63 +599,65 @@ export function Tests({ soul, entities }: Props) {
       {stats.completed > 0 && (
         <div style={CARD}>
           <strong>History</strong>
-          <table
-            style={{
-              width: '100%',
-              borderCollapse: 'collapse',
-              marginTop: '8px',
-              fontSize: '13px',
-            }}
-          >
-            <thead>
-              <tr style={{ textAlign: 'left', color: '#666', fontSize: '12px' }}>
-                <th style={{ padding: '4px 6px' }}>Scenario</th>
-                <th style={{ padding: '4px 6px' }}>Choice</th>
-                <th style={{ padding: '4px 6px' }}>Result</th>
-                <th style={{ padding: '4px 6px' }} />
-              </tr>
-            </thead>
-            <tbody>
-              {records
-                .filter(
-                  (r): r is EvaluationRecord & { user_choice: 'a' | 'b' | 'neither' } =>
-                    r.user_choice !== null,
-                )
-                .map((r) => {
-                  const res = revealFor(r, r.user_choice);
-                  return (
-                    <tr key={r.id} style={{ borderTop: '1px solid #f3f4f6' }}>
-                      <td style={{ padding: '6px' }}>
-                        {scenarioById(r.scenario_id)?.question ?? r.scenario_text}
-                      </td>
-                      <td style={{ padding: '6px' }}>{res.choiceLabel}</td>
-                      <td style={{ padding: '6px' }}>
-                        <span
-                          style={{
-                            color: res.matchedSoul ? '#065f46' : '#9ca3af',
-                            fontWeight: res.matchedSoul ? '600' : '400',
-                          }}
-                        >
-                          {res.matchedSoul
-                            ? 'SOUL'
-                            : res.choiceLabel === 'Neither'
-                              ? 'tie'
-                              : 'baseline'}
-                        </span>
-                      </td>
-                      <td style={{ padding: '6px', textAlign: 'right' }}>
-                        <button
-                          onClick={() => handleDelete(r.id)}
-                          style={{ ...BTN_SECONDARY, fontSize: '12px', padding: '2px 8px' }}
-                        >
-                          Delete
-                        </button>
-                      </td>
-                    </tr>
-                  );
-                })}
-            </tbody>
-          </table>
+          <div className="responsive-table" tabIndex={0} aria-label="Blind test history table">
+            <table
+              style={{
+                width: '100%',
+                borderCollapse: 'collapse',
+                marginTop: '8px',
+                fontSize: '13px',
+              }}
+            >
+              <thead>
+                <tr style={{ textAlign: 'left', color: '#666', fontSize: '12px' }}>
+                  <th style={{ padding: '4px 6px' }}>Scenario</th>
+                  <th style={{ padding: '4px 6px' }}>Choice</th>
+                  <th style={{ padding: '4px 6px' }}>Result</th>
+                  <th style={{ padding: '4px 6px' }} />
+                </tr>
+              </thead>
+              <tbody>
+                {records
+                  .filter(
+                    (r): r is EvaluationRecord & { user_choice: 'a' | 'b' | 'neither' } =>
+                      r.user_choice !== null,
+                  )
+                  .map((r) => {
+                    const res = revealFor(r, r.user_choice);
+                    return (
+                      <tr key={r.id} style={{ borderTop: '1px solid #f3f4f6' }}>
+                        <td style={{ padding: '6px' }}>
+                          {scenarioById(r.scenario_id)?.question ?? r.scenario_text}
+                        </td>
+                        <td style={{ padding: '6px' }}>{res.choiceLabel}</td>
+                        <td style={{ padding: '6px' }}>
+                          <span
+                            style={{
+                              color: res.matchedSoul ? '#065f46' : '#9ca3af',
+                              fontWeight: res.matchedSoul ? '600' : '400',
+                            }}
+                          >
+                            {res.matchedSoul
+                              ? 'SOUL'
+                              : res.choiceLabel === 'Neither'
+                                ? 'tie'
+                                : 'baseline'}
+                          </span>
+                        </td>
+                        <td style={{ padding: '6px', textAlign: 'right' }}>
+                          <button
+                            onClick={() => handleDelete(r.id)}
+                            style={{ ...BTN_SECONDARY, fontSize: '12px', padding: '2px 8px' }}
+                          >
+                            Delete
+                          </button>
+                        </td>
+                      </tr>
+                    );
+                  })}
+              </tbody>
+            </table>
+          </div>
         </div>
       )}
 

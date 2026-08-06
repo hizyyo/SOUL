@@ -14,7 +14,7 @@ use crate::context::{self, ContextQuery};
 use crate::package::{self, DisclosureReceipt};
 use rusqlite::{Connection, OpenFlags};
 use serde_json::{json, Value};
-use std::collections::HashSet;
+use std::collections::{HashSet, VecDeque};
 use std::io::{Read, Write};
 use std::path::Path;
 
@@ -112,7 +112,10 @@ fn error_response(nonce: Option<&str>, code: &str, message: impl Into<String>) -
 #[derive(Default)]
 pub struct BridgeSession {
     seen_nonces: HashSet<String>,
+    nonce_order: VecDeque<String>,
 }
+
+const MAX_SESSION_NONCES: usize = 4_096;
 
 impl BridgeSession {
     pub fn new() -> BridgeSession {
@@ -120,7 +123,18 @@ impl BridgeSession {
     }
 
     fn register_nonce(&mut self, nonce: &str) -> bool {
-        self.seen_nonces.insert(nonce.to_string())
+        if self.seen_nonces.contains(nonce) {
+            return false;
+        }
+        if self.nonce_order.len() >= MAX_SESSION_NONCES {
+            if let Some(oldest) = self.nonce_order.pop_front() {
+                self.seen_nonces.remove(&oldest);
+            }
+        }
+        let nonce = nonce.to_string();
+        self.seen_nonces.insert(nonce.clone());
+        self.nonce_order.push_back(nonce);
+        true
     }
 }
 
@@ -492,7 +506,7 @@ mod tests {
         assert_eq!(res["ok"], true);
         assert_eq!(res["nonce"], "test_nonce_000000000000001");
         assert_eq!(res["protocol"], BRIDGE_PROTOCOL_VERSION);
-        assert_eq!(res["entityCount"], 2);
+        assert_eq!(res["entityCount"], 1);
         assert!(res["pack"].as_str().unwrap().starts_with("SOUL CONTEXT"));
 
         let receipts = receipt_texts(&env);
@@ -698,6 +712,18 @@ mod tests {
     }
 
     #[test]
+    fn replay_cache_is_bounded() {
+        let mut session = BridgeSession::new();
+        for index in 0..(MAX_SESSION_NONCES + 20) {
+            assert!(session.register_nonce(&format!("nonce_{index:016}")));
+        }
+        assert_eq!(session.seen_nonces.len(), MAX_SESSION_NONCES);
+        assert_eq!(session.nonce_order.len(), MAX_SESSION_NONCES);
+        assert!(session.register_nonce("nonce_0000000000000000"));
+        assert!(!session.register_nonce("nonce_0000000000000021"));
+    }
+
+    #[test]
     fn serve_loop_roundtrips_over_frames() {
         let env = TestEnv::new();
         let mut input: Vec<u8> = Vec::new();
@@ -759,6 +785,7 @@ mod tests {
 
     /// E2E: реальный бинарь soul-bridge.exe по кадрам native messaging.
     #[test]
+    #[ignore = "run through pnpm release:check after building release sidecars"]
     fn real_binary_serves_native_messaging() {
         use std::process::{Command, Stdio};
         use std::time::Duration;

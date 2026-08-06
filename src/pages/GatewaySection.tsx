@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useState, type CSSProperties } from 'react';
+import { useCallback, useEffect, useRef, useState, type CSSProperties } from 'react';
 import {
   GATEWAY_CONNECTOR_OPTIONS,
   GATEWAY_DEFAULT_TTL,
@@ -21,6 +21,9 @@ import {
 } from '../data/gateway';
 import { EffectBadge } from './PolicyBadges';
 import { safeErrorMessage } from '../data/safeError';
+import { Modal } from '../components/Modal';
+import { createLatestRequestGate } from '../data/mutations';
+import { useGlobalMutation } from '../data/useMutation';
 
 declare global {
   interface Window {
@@ -197,7 +200,9 @@ export function GatewaySection() {
   const [ttl, setTtl] = useState(String(GATEWAY_DEFAULT_TTL));
   const [proposal, setProposal] = useState<GatewayProposal | null>(null);
   const [proposeError, setProposeError] = useState<string | null>(null);
-  const [busy, setBusy] = useState(false);
+  const { activeKey, run: runMutation } = useGlobalMutation();
+  const busy = activeKey !== null;
+  const refreshGateRef = useRef(createLatestRequestGate());
 
   const [channel, setChannel] = useState<GatewayChannel>(
     GATEWAY_CONNECTOR_OPTIONS[0] ?? {
@@ -219,22 +224,25 @@ export function GatewaySection() {
   const [newAccountId, setNewAccountId] = useState('');
   const [newEnvironment, setNewEnvironment] = useState('');
   const [registryError, setRegistryError] = useState<string | null>(null);
+  const [removeTarget, setRemoveTarget] = useState<GatewayChannel | null>(null);
 
   const channelOptions = connectors.length > 0 ? connectors : GATEWAY_CONNECTOR_OPTIONS;
 
   const refresh = useCallback(async () => {
+    const request = refreshGateRef.current.begin();
     try {
       const [r, c, ch] = await Promise.all([
         invoke<GatewayReceipt[]>('list_gateway_receipts_cmd'),
         invoke<GatewayCapability[]>('list_gateway_capabilities_cmd'),
         invoke<GatewayChannel[]>('list_gateway_connectors_cmd'),
       ]);
+      if (!request.isCurrent()) return;
       setReceipts(r);
       setCapabilities(c);
       setConnectors(ch);
       setLoadError(null);
     } catch {
-      setLoadError(safeErrorMessage('загрузить данные Gateway'));
+      if (request.isCurrent()) setLoadError(safeErrorMessage('загрузить данные Gateway'));
     }
   }, []);
 
@@ -251,64 +259,62 @@ export function GatewaySection() {
       setProposeError(state.error ?? 'Invalid action.');
       return;
     }
-    setBusy(true);
-    try {
-      const ttlSeconds = ttl.trim() === '' ? null : Number(ttl);
-      const result = await invoke<GatewayProposal>('gateway_propose_cmd', {
-        actionJson,
-        ttlSeconds,
-      });
-      setProposal(result);
-      if (result.capability) {
-        setChannel({
-          connector_id: result.capability.connector_id,
-          account_id: result.capability.account_id,
-          environment: result.capability.environment,
+    await runMutation('gateway:propose', async () => {
+      try {
+        const ttlSeconds = ttl.trim() === '' ? null : Number(ttl);
+        const result = await invoke<GatewayProposal>('gateway_propose_cmd', {
+          actionJson,
+          ttlSeconds,
         });
+        setProposal(result);
+        if (result.capability) {
+          setChannel({
+            connector_id: result.capability.connector_id,
+            account_id: result.capability.account_id,
+            environment: result.capability.environment,
+          });
+        }
+        await refresh();
+      } catch {
+        setProposeError(safeErrorMessage('предложить действие'));
       }
-      await refresh();
-    } catch {
-      setProposeError(safeErrorMessage('предложить действие'));
-    } finally {
-      setBusy(false);
-    }
+    });
   };
 
   const handleExecute = async () => {
-    if (!proposal?.capability) return;
+    const capability = proposal?.capability;
+    if (!capability) return;
     setExecuteError(null);
     setExecution(null);
-    setBusy(true);
-    try {
-      const result = await invoke<GatewayExecuteResult>('gateway_execute_cmd', {
-        capabilityId: proposal.capability.id,
-        connectorId: channel.connector_id,
-        accountId: channel.account_id,
-        environment: channel.environment,
-        actionJson,
-      });
-      setExecution(result);
-      await refresh();
-    } catch {
-      setExecuteError(safeErrorMessage('выполнить имитацию'));
-    } finally {
-      setBusy(false);
-    }
+    await runMutation('gateway:execute', async () => {
+      try {
+        const result = await invoke<GatewayExecuteResult>('gateway_execute_cmd', {
+          capabilityId: capability.id,
+          connectorId: channel.connector_id,
+          accountId: channel.account_id,
+          environment: channel.environment,
+          actionJson,
+        });
+        setExecution(result);
+        await refresh();
+      } catch {
+        setExecuteError(safeErrorMessage('выполнить имитацию'));
+      }
+    });
   };
 
   const handleConfirm = async (cap: GatewayCapability) => {
-    setBusy(true);
-    try {
-      const confirmed = await invoke<GatewayCapability>('gateway_confirm_cmd', {
-        capabilityId: cap.id,
-      });
-      setProposal((p) => (p ? { ...p, capability: confirmed } : p));
-      await refresh();
-    } catch {
-      setProposeError(safeErrorMessage('подтвердить capability'));
-    } finally {
-      setBusy(false);
-    }
+    await runMutation(`gateway:confirm:${cap.id}`, async () => {
+      try {
+        const confirmed = await invoke<GatewayCapability>('gateway_confirm_cmd', {
+          capabilityId: cap.id,
+        });
+        setProposal((p) => (p ? { ...p, capability: confirmed } : p));
+        await refresh();
+      } catch {
+        setProposeError(safeErrorMessage('подтвердить capability'));
+      }
+    });
   };
 
   const handleAddConnector = async () => {
@@ -318,38 +324,44 @@ export function GatewaySection() {
       setRegistryError(state.error ?? 'Invalid channel.');
       return;
     }
-    setBusy(true);
-    try {
-      await invoke<GatewayChannel>('gateway_add_connector_cmd', {
-        connectorId: newConnectorId.trim(),
-        accountId: newAccountId.trim(),
-        environment: newEnvironment.trim(),
-      });
-      setNewConnectorId('');
-      setNewAccountId('');
-      setNewEnvironment('');
-      await refresh();
-    } catch {
-      setRegistryError(safeErrorMessage('добавить канал'));
-    } finally {
-      setBusy(false);
-    }
+    await runMutation('gateway:connector:add', async () => {
+      try {
+        await invoke<GatewayChannel>('gateway_add_connector_cmd', {
+          connectorId: newConnectorId.trim(),
+          accountId: newAccountId.trim(),
+          environment: newEnvironment.trim(),
+        });
+        setNewConnectorId('');
+        setNewAccountId('');
+        setNewEnvironment('');
+        await refresh();
+      } catch {
+        setRegistryError(safeErrorMessage('добавить канал'));
+      }
+    });
   };
 
   const handleRemoveConnector = async (c: GatewayChannel) => {
-    setBusy(true);
-    try {
-      await invoke<boolean>('gateway_remove_connector_cmd', {
-        connectorId: c.connector_id,
-        accountId: c.account_id,
-        environment: c.environment,
-      });
-      await refresh();
-    } catch {
-      setRegistryError(safeErrorMessage('удалить канал'));
-    } finally {
-      setBusy(false);
-    }
+    const result = await runMutation(`gateway:connector:remove:${channelLabel(c)}`, async () => {
+      setRegistryError(null);
+      try {
+        const removed = await invoke<boolean>('gateway_remove_connector_cmd', {
+          connectorId: c.connector_id,
+          accountId: c.account_id,
+          environment: c.environment,
+        });
+        if (!removed) throw new Error('Connector not found.');
+        setConnectors((current) =>
+          current.filter((connector) => channelLabel(connector) !== channelLabel(c)),
+        );
+        await refresh();
+        return true;
+      } catch {
+        setRegistryError(safeErrorMessage('удалить канал'));
+        return false;
+      }
+    });
+    if (result.started && result.value) setRemoveTarget(null);
   };
 
   return (
@@ -376,7 +388,10 @@ export function GatewaySection() {
       </p>
 
       {loadError && (
-        <div style={{ ...CARD, borderColor: '#fecaca', background: '#fef2f2', color: '#dc2626' }}>
+        <div
+          role="alert"
+          style={{ ...CARD, borderColor: '#fecaca', background: '#fef2f2', color: '#dc2626' }}
+        >
           {loadError}
         </div>
       )}
@@ -387,7 +402,11 @@ export function GatewaySection() {
           Агент предлагает действие; gateway нормализует его и оценивает политиками. Поле
           payloadHash агента не доверяется — hash нагрузки вычисляется заново.
         </p>
+        <label htmlFor="gateway-action-json" style={LABEL}>
+          Action JSON
+        </label>
         <textarea
+          id="gateway-action-json"
           value={actionJson}
           onChange={(e) => setActionJson(e.target.value)}
           style={TEXTAREA}
@@ -417,7 +436,9 @@ export function GatewaySection() {
             Предложить действие
           </button>
           {proposeError && (
-            <span style={{ fontSize: '13px', color: '#dc2626' }}>{proposeError}</span>
+            <span role="alert" style={{ fontSize: '13px', color: '#dc2626' }}>
+              {proposeError}
+            </span>
           )}
         </div>
       </div>
@@ -454,7 +475,11 @@ export function GatewaySection() {
             локальном реестре имитированных коннекторов. При успехе capability сгорит (однократное
             использование); изменённая нагрузка, повтор, просрочка, другой канал — отказ.
           </p>
+          <label htmlFor="gateway-channel" style={LABEL}>
+            Simulated connector channel
+          </label>
           <select
+            id="gateway-channel"
             value={channelLabel(channel)}
             onChange={(e) => {
               const next = channelOptions.find((c) => channelLabel(c) === e.target.value);
@@ -473,7 +498,9 @@ export function GatewaySection() {
               Выполнить (имитация)
             </button>
             {executeError && (
-              <span style={{ fontSize: '13px', color: '#dc2626' }}>{executeError}</span>
+              <span role="alert" style={{ fontSize: '13px', color: '#dc2626' }}>
+                {executeError}
+              </span>
             )}
           </div>
           {execution && (
@@ -514,7 +541,7 @@ export function GatewaySection() {
           коннектором — никаких реальных агентов. Capability без канала в реестре не выдаётся.
         </p>
         {registryError && (
-          <div style={{ fontSize: '13px', color: '#dc2626', marginBottom: '8px' }}>
+          <div role="alert" style={{ fontSize: '13px', color: '#dc2626', marginBottom: '8px' }}>
             {registryError}
           </div>
         )}
@@ -527,19 +554,31 @@ export function GatewaySection() {
             alignItems: 'center',
           }}
         >
+          <label htmlFor="gateway-connector-id" className="sr-only">
+            Connector ID
+          </label>
           <input
+            id="gateway-connector-id"
             value={newConnectorId}
             onChange={(e) => setNewConnectorId(e.target.value)}
             placeholder="connectorId"
             style={{ ...INPUT, maxWidth: '180px' }}
           />
+          <label htmlFor="gateway-account-id" className="sr-only">
+            Account ID
+          </label>
           <input
+            id="gateway-account-id"
             value={newAccountId}
             onChange={(e) => setNewAccountId(e.target.value)}
             placeholder="accountId"
             style={{ ...INPUT, maxWidth: '140px' }}
           />
+          <label htmlFor="gateway-environment" className="sr-only">
+            Environment
+          </label>
           <input
+            id="gateway-environment"
             value={newEnvironment}
             onChange={(e) => setNewEnvironment(e.target.value)}
             placeholder="environment"
@@ -563,8 +602,15 @@ export function GatewaySection() {
               fontSize: '13px',
             }}
           >
-            <span>{channelLabel(c)}</span>
-            <button onClick={() => void handleRemoveConnector(c)} style={BTN_SMALL} disabled={busy}>
+            <span style={{ minWidth: 0, overflowWrap: 'anywhere' }}>{channelLabel(c)}</span>
+            <button
+              onClick={() => {
+                setRegistryError(null);
+                setRemoveTarget(c);
+              }}
+              style={BTN_SMALL}
+              disabled={busy}
+            >
               Удалить
             </button>
           </div>
@@ -611,6 +657,44 @@ export function GatewaySection() {
           <CapabilityCard key={c.id} cap={c} onConfirm={handleConfirm} busy={busy} />
         ))}
       </div>
+
+      {removeTarget && (
+        <Modal
+          title="Remove simulated connector?"
+          onClose={() => setRemoveTarget(null)}
+          closeOnBackdrop={!busy}
+          closeOnEscape={!busy}
+          ariaDescribedBy={
+            registryError ? 'connector-remove-error' : 'connector-remove-description'
+          }
+        >
+          <p id="connector-remove-description" style={{ fontSize: '13px', color: '#4b5563' }}>
+            Remove <code>{channelLabel(removeTarget)}</code> from the local simulated connector
+            registry? You can add it again later.
+          </p>
+          {registryError && (
+            <p
+              id="connector-remove-error"
+              role="alert"
+              style={{ color: '#b91c1c', fontSize: '13px' }}
+            >
+              {registryError}
+            </p>
+          )}
+          <div style={{ display: 'flex', justifyContent: 'flex-end', gap: '8px' }}>
+            <button onClick={() => setRemoveTarget(null)} disabled={busy} style={BTN_SMALL}>
+              Cancel
+            </button>
+            <button
+              onClick={() => void handleRemoveConnector(removeTarget)}
+              disabled={busy}
+              style={{ ...BTN_SMALL, background: '#dc2626', color: '#fff' }}
+            >
+              {busy ? 'Removing...' : 'Remove connector'}
+            </button>
+          </div>
+        </Modal>
+      )}
     </div>
   );
 }

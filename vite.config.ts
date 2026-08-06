@@ -8,7 +8,7 @@ export default defineConfig({
   plugins: [react()],
   resolve: {
     alias: {
-      '@': path.resolve(__dirname, 'src'),
+      '@': path.resolve(import.meta.dirname, 'src'),
     },
   },
   clearScreen: false,
@@ -16,9 +16,7 @@ export default defineConfig({
     port: 1420,
     strictPort: true,
     host: host || '127.0.0.1',
-    hmr: host
-      ? { protocol: 'ws', host, port: 1421 }
-      : undefined,
+    hmr: host ? { protocol: 'ws', host, port: 1421 } : undefined,
     watch: { ignored: ['**/src-tauri/**'] },
   },
 });

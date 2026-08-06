@@ -26,6 +26,12 @@ export const MAX_FRAME_BYTES = 1024 * 1024;
 /** Максимальная длина текста задачи из поля ввода. */
 export const MAX_TASK_CHARS = 8000;
 
+/** Максимальная длина скомпилированного context pack. */
+export const MAX_PACK_CHARS = 60_000;
+
+/** Версия policy-кодекса, которую понимает текущий companion. */
+export const CONTEXT_POLICY_VERSION = 'soul-context-policy/1';
+
 /** Бюджет токенов контекста (совпадает с компилятором). */
 export const DEFAULT_TOKENS = 900;
 export const MAX_TOKENS = 3000;

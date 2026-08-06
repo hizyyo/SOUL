@@ -6,6 +6,7 @@ use chrono::Utc;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use std::fs;
+use std::io::Write as _;
 use std::path::Path;
 use uuid::Uuid;
 
@@ -13,15 +14,19 @@ pub const PACKAGE_FORMAT: &str = "soul-package";
 pub const PACKAGE_FORMAT_VERSION: &str = "0.1.0";
 pub const SCHEMA_VERSION: &str = "0.1.0";
 pub const PAYLOAD_FORMAT: &str = "soul-export";
-pub const PAYLOAD_VERSION: &str = "1";
+pub const PAYLOAD_VERSION: &str = "2";
+const LEGACY_PAYLOAD_VERSION: &str = "1";
 pub const MAX_PACKAGE_BYTES: usize = 100 * 1024 * 1024;
 
 /// Верхние границы параметров KDF, принимаемых при импорте: защита от
 /// вредоносного пакета с запредельным mem_cost/time (память/CPU DoS) ещё до
 /// запуска argon2. Значения заметно выше экспортных дефолтов.
-pub const MAX_ACCEPTED_KDF_MEM_KIB: u32 = 2_000_000;
-pub const MAX_ACCEPTED_KDF_TIME: u32 = 10;
-pub const MAX_ACCEPTED_KDF_PARALLELISM: u32 = 4;
+pub const MAX_ACCEPTED_KDF_MEM_KIB: u32 = 131_072;
+pub const MAX_ACCEPTED_KDF_TIME: u32 = 4;
+pub const MAX_ACCEPTED_KDF_PARALLELISM: u32 = 2;
+pub const MAX_PACKAGE_ENTITIES: usize = db::MAX_ENTITIES_PER_SOUL;
+pub const MAX_PACKAGE_EVENTS: usize = db::MAX_EVENTS_PER_SOUL;
+const MAX_MANIFEST_FIELD_CHARS: usize = 512;
 
 #[derive(Debug, Serialize, Deserialize, Clone)]
 pub struct CipherParams {
@@ -61,6 +66,41 @@ pub struct CalibrationPayload {
 }
 
 #[derive(Debug, Serialize, Deserialize, Clone)]
+pub struct PolicyArchiveRow {
+    id: String,
+    priority: i64,
+    enabled: bool,
+    rule_json: String,
+    created_at: String,
+    updated_at: String,
+}
+
+#[derive(Debug, Serialize, Deserialize, Clone)]
+pub struct GatewayConnectorArchiveRow {
+    connector_id: String,
+    account_id: String,
+    environment: String,
+}
+
+#[derive(Debug, Serialize, Deserialize, Clone)]
+pub struct GatewayReceiptArchiveRow {
+    id: String,
+    capability_id: Option<String>,
+    action_id: String,
+    kind: String,
+    status: String,
+    decision_effect: String,
+    rule_id: Option<String>,
+    message: Option<String>,
+    connector_executed: bool,
+    reason: Option<String>,
+    nonce: Option<String>,
+    created_at: String,
+    signature: String,
+    signer_public_key: String,
+}
+
+#[derive(Debug, Serialize, Deserialize, Clone)]
 pub struct SoulExportPayload {
     pub format: String,
     pub version: String,
@@ -68,6 +108,20 @@ pub struct SoulExportPayload {
     pub entities: Vec<db::EntityRow>,
     pub events: Vec<db::SoulEvent>,
     pub calibration: CalibrationPayload,
+    /// Version 2 archive state. Missing fields identify a legacy core-only
+    /// backup and are intentionally restored with local demo defaults.
+    #[serde(default)]
+    pub evaluations: Vec<crate::eval::EvaluationRow>,
+    #[serde(default)]
+    pub policies: Vec<PolicyArchiveRow>,
+    #[serde(default)]
+    pub policy_meta: Vec<(String, String)>,
+    #[serde(default)]
+    pub gateway_connectors: Vec<GatewayConnectorArchiveRow>,
+    #[serde(default)]
+    pub gateway_meta: Vec<(String, String)>,
+    #[serde(default)]
+    pub gateway_receipts: Vec<GatewayReceiptArchiveRow>,
 }
 
 #[derive(Debug, Serialize)]
@@ -114,6 +168,9 @@ pub struct ImportPreview {
     pub activated: bool,
     pub head_event_hash: Option<String>,
     pub entity_counts: Vec<EntityCount>,
+    /// True only for v1 backups, which predate evaluations, policies and
+    /// Gateway state. The UI can explain that defaults will be reseeded.
+    pub partial_restore: bool,
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -297,10 +354,31 @@ pub fn build_export_payload(
     let soul = db::get_soul(conn, soul_id)
         .map_err(|e| e.to_string())?
         .ok_or("SOUL not found.".to_string())?;
+    let entity_count: i64 = conn
+        .query_row(
+            "SELECT COUNT(*) FROM entities WHERE soul_id = ?1",
+            rusqlite::params![soul_id],
+            |row| row.get(0),
+        )
+        .map_err(|e| e.to_string())?;
+    let event_count: i64 = conn
+        .query_row(
+            "SELECT COUNT(*) FROM events WHERE soul_id = ?1",
+            rusqlite::params![soul_id],
+            |row| row.get(0),
+        )
+        .map_err(|e| e.to_string())?;
+    validate_package_counts(entity_count as usize, event_count as usize)?;
     let entities = db::list_entities(conn, soul_id).map_err(|e| e.to_string())?;
     let events = db::list_events(conn, soul_id).map_err(|e| e.to_string())?;
     let (step, answers, activated, _) =
         db::get_soul_state(conn, soul_id).map_err(|e| e.to_string())?;
+    let evaluations = crate::eval::list_evaluations(conn, soul_id)?;
+    let policies = read_policy_rows(conn)?;
+    let policy_meta = read_meta_rows(conn, "policy_meta")?;
+    let gateway_connectors = read_gateway_connectors(conn)?;
+    let gateway_meta = read_meta_rows(conn, "gateway_meta")?;
+    let gateway_receipts = read_gateway_receipts(conn)?;
     Ok(SoulExportPayload {
         format: PAYLOAD_FORMAT.to_string(),
         version: PAYLOAD_VERSION.to_string(),
@@ -312,7 +390,95 @@ pub fn build_export_payload(
             answers,
             activated,
         },
+        evaluations,
+        policies,
+        policy_meta,
+        gateway_connectors,
+        gateway_meta,
+        gateway_receipts,
     })
+}
+
+fn read_policy_rows(conn: &rusqlite::Connection) -> Result<Vec<PolicyArchiveRow>, String> {
+    let mut stmt = conn
+        .prepare("SELECT id, priority, enabled, rule_json, created_at, updated_at FROM policies")
+        .map_err(|e| format!("policy archive prepare failed: {e}"))?;
+    let rows = stmt
+        .query_map([], |row| {
+            Ok(PolicyArchiveRow {
+                id: row.get(0)?,
+                priority: row.get(1)?,
+                enabled: row.get::<_, i64>(2)? != 0,
+                rule_json: row.get(3)?,
+                created_at: row.get(4)?,
+                updated_at: row.get(5)?,
+            })
+        })
+        .map_err(|e| format!("policy archive query failed: {e}"))?;
+    rows.collect::<Result<Vec<_>, _>>()
+        .map_err(|e| format!("policy archive row failed: {e}"))
+}
+
+fn read_meta_rows(
+    conn: &rusqlite::Connection,
+    table: &str,
+) -> Result<Vec<(String, String)>, String> {
+    let mut stmt = conn
+        .prepare(&format!("SELECT key, value FROM {table}"))
+        .map_err(|e| format!("archive metadata prepare failed: {e}"))?;
+    let rows = stmt
+        .query_map([], |row| Ok((row.get(0)?, row.get(1)?)))
+        .map_err(|e| format!("archive metadata query failed: {e}"))?;
+    rows.collect::<Result<Vec<_>, _>>()
+        .map_err(|e| format!("archive metadata row failed: {e}"))
+}
+
+fn read_gateway_connectors(
+    conn: &rusqlite::Connection,
+) -> Result<Vec<GatewayConnectorArchiveRow>, String> {
+    let mut stmt = conn
+        .prepare("SELECT connector_id, account_id, environment FROM gateway_connectors")
+        .map_err(|e| format!("gateway connector archive prepare failed: {e}"))?;
+    let rows = stmt
+        .query_map([], |row| {
+            Ok(GatewayConnectorArchiveRow {
+                connector_id: row.get(0)?,
+                account_id: row.get(1)?,
+                environment: row.get(2)?,
+            })
+        })
+        .map_err(|e| format!("gateway connector archive query failed: {e}"))?;
+    rows.collect::<Result<Vec<_>, _>>()
+        .map_err(|e| format!("gateway connector archive row failed: {e}"))
+}
+
+fn read_gateway_receipts(
+    conn: &rusqlite::Connection,
+) -> Result<Vec<GatewayReceiptArchiveRow>, String> {
+    let mut stmt = conn.prepare("SELECT id, capability_id, action_id, kind, status, decision_effect, rule_id, message, connector_executed, reason, nonce, created_at, signature, signer_public_key FROM gateway_receipts")
+        .map_err(|e| format!("gateway receipt archive prepare failed: {e}"))?;
+    let rows = stmt
+        .query_map([], |row| {
+            Ok(GatewayReceiptArchiveRow {
+                id: row.get(0)?,
+                capability_id: row.get(1)?,
+                action_id: row.get(2)?,
+                kind: row.get(3)?,
+                status: row.get(4)?,
+                decision_effect: row.get(5)?,
+                rule_id: row.get(6)?,
+                message: row.get(7)?,
+                connector_executed: row.get::<_, i64>(8)? != 0,
+                reason: row.get(9)?,
+                nonce: row.get(10)?,
+                created_at: row.get(11)?,
+                signature: row.get(12)?,
+                signer_public_key: row.get(13)?,
+            })
+        })
+        .map_err(|e| format!("gateway receipt archive query failed: {e}"))?;
+    rows.collect::<Result<Vec<_>, _>>()
+        .map_err(|e| format!("gateway receipt archive row failed: {e}"))
 }
 
 pub fn export_package(
@@ -334,6 +500,119 @@ pub fn validate_export_path(path: &Path) -> Result<(), String> {
     }
     if s.contains('\0') {
         return Err("Export path must not contain NUL characters.".to_string());
+    }
+    if !path.is_absolute() {
+        return Err("Export path must be absolute.".to_string());
+    }
+    let parent = path
+        .parent()
+        .ok_or("Export path has no parent directory.".to_string())?;
+    if !parent.is_dir() {
+        return Err("Export parent directory does not exist.".to_string());
+    }
+    if path.exists() && !path.is_file() {
+        return Err("Export path must name a regular file.".to_string());
+    }
+    Ok(())
+}
+
+fn validate_path_extension(path: &Path, allowed: &[&str]) -> Result<(), String> {
+    let ext = path
+        .extension()
+        .and_then(|v| v.to_str())
+        .unwrap_or_default();
+    if !allowed
+        .iter()
+        .any(|allowed| ext.eq_ignore_ascii_case(allowed))
+    {
+        return Err(format!(
+            "File extension must be one of: {}.",
+            allowed.join(", ")
+        ));
+    }
+    Ok(())
+}
+
+fn replacement_backup_path(target: &Path) -> std::path::PathBuf {
+    let parent = target.parent().unwrap_or_else(|| Path::new("."));
+    let name = target
+        .file_name()
+        .map(|value| value.to_string_lossy().to_string())
+        .unwrap_or_else(|| "export".to_string());
+    parent.join(format!(".{name}.soul-replace-backup"))
+}
+
+fn atomic_write(path: &Path, bytes: &[u8]) -> Result<(), String> {
+    let parent = path
+        .parent()
+        .ok_or("Export path has no parent directory.".to_string())?;
+    let name = path
+        .file_name()
+        .map(|value| value.to_string_lossy().to_string())
+        .unwrap_or_else(|| "export".to_string());
+    let temp = parent.join(format!(".{name}.soul-tmp-{}", Uuid::new_v4()));
+    let backup = replacement_backup_path(path);
+
+    if !path.exists() && backup.exists() {
+        fs::rename(&backup, path)
+            .map_err(|e| format!("Cannot recover interrupted export replacement: {e}"))?;
+    } else if path.exists() && backup.exists() {
+        fs::remove_file(&backup)
+            .map_err(|e| format!("Cannot clean stale export replacement backup: {e}"))?;
+    }
+
+    let write_result = (|| -> Result<(), String> {
+        let mut file = fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(&temp)
+            .map_err(|e| format!("Cannot create temporary export file: {e}"))?;
+        file.write_all(bytes)
+            .map_err(|e| format!("Cannot write export file: {e}"))?;
+        file.sync_all()
+            .map_err(|e| format!("Cannot flush export file: {e}"))
+    })();
+    if let Err(error) = write_result {
+        let _ = fs::remove_file(&temp);
+        return Err(error);
+    }
+
+    match fs::rename(&temp, path) {
+        Ok(()) => Ok(()),
+        Err(first) if path.exists() => {
+            fs::rename(path, &backup)
+                .map_err(|e| format!("Cannot preserve existing export before replacement: {e}"))?;
+            match fs::rename(&temp, path) {
+                Ok(()) => {
+                    let _ = fs::remove_file(&backup);
+                    Ok(())
+                }
+                Err(second) => {
+                    let _ = fs::rename(&backup, path);
+                    let _ = fs::remove_file(&temp);
+                    Err(format!(
+                        "Cannot replace export file: {second} (initial rename: {first})"
+                    ))
+                }
+            }
+        }
+        Err(error) => {
+            let _ = fs::remove_file(&temp);
+            Err(format!("Cannot install export file: {error}"))
+        }
+    }
+}
+
+fn validate_package_counts(entity_count: usize, event_count: usize) -> Result<(), String> {
+    if entity_count > MAX_PACKAGE_ENTITIES {
+        return Err(format!(
+            "Package contains too many entities (limit {MAX_PACKAGE_ENTITIES})."
+        ));
+    }
+    if event_count > MAX_PACKAGE_EVENTS {
+        return Err(format!(
+            "Package contains too many events (limit {MAX_PACKAGE_EVENTS})."
+        ));
     }
     Ok(())
 }
@@ -365,6 +644,7 @@ pub fn export_package_with_params(
     kdf: Option<(u32, u32, u32)>,
 ) -> Result<ExportReceipt, String> {
     validate_export_path(path)?;
+    validate_path_extension(path, &["soul"])?;
     crypto::ensure_password_valid(password)?;
     let payload = build_export_payload(conn, soul_id)?;
     let plaintext = serde_json::to_vec(&payload).map_err(|e| format!("Serialize failed: {e}"))?;
@@ -405,7 +685,7 @@ pub fn export_package_with_params(
     envelope.signature = Some(B64.encode(signature));
 
     let file_bytes = serde_json::to_vec(&envelope).map_err(|e| format!("Serialize failed: {e}"))?;
-    fs::write(path, &file_bytes).map_err(|e| format!("Cannot write export file: {e}"))?;
+    atomic_write(path, &file_bytes)?;
 
     Ok(ExportReceipt {
         path: path.to_string_lossy().to_string(),
@@ -434,9 +714,10 @@ fn verify_event_chain(payload: &SoulExportPayload) -> Result<(), String> {
         return Ok(());
     }
     let mut ids: std::collections::HashSet<&str> = std::collections::HashSet::new();
-    let mut hashes: std::collections::HashSet<&str> = std::collections::HashSet::new();
-    let mut root_count = 0usize;
-    let mut last_hash: Option<String> = None;
+    let mut by_hash: std::collections::HashMap<&str, &db::SoulEvent> =
+        std::collections::HashMap::new();
+    let mut children: std::collections::HashMap<&str, usize> = std::collections::HashMap::new();
+    let mut root: Option<&db::SoulEvent> = None;
     for ev in &payload.events {
         if ev.soul_id != payload.soul.soul_id {
             return Err(format!(
@@ -447,29 +728,37 @@ fn verify_event_chain(payload: &SoulExportPayload) -> Result<(), String> {
         if !ids.insert(&ev.event_id) {
             return Err(format!("Duplicate event id in package: {}.", ev.event_id));
         }
-        let h = db::compute_hash(&ev.payload);
+        db::validate_event_fields(ev)?;
+        let h = db::event_content_hash(ev);
         if h != ev.content_hash {
             return Err(format!(
-                "Event {} content hash does not match its payload.",
+                "Event {} content hash does not match its event record.",
                 ev.event_id
             ));
         }
-        hashes.insert(&ev.content_hash);
-        if ev.previous_event_hash.is_none() {
-            root_count += 1;
+        if by_hash.insert(&ev.content_hash, ev).is_some() {
+            return Err(format!(
+                "Duplicate event content hash in package: {}.",
+                ev.content_hash
+            ));
         }
-        last_hash = Some(h);
+        if ev.previous_event_hash.is_none() && root.replace(ev).is_some() {
+            return Err("Package event chain must have exactly one root event.".to_string());
+        }
     }
-    if root_count != 1 {
-        return Err("Package event chain must have exactly one root event.".to_string());
-    }
+    let root = root.ok_or("Package event chain must have exactly one root event.".to_string())?;
     for ev in &payload.events {
         if let Some(prev) = &ev.previous_event_hash {
-            if !hashes.contains(prev.as_str()) {
+            if !by_hash.contains_key(prev.as_str()) {
                 return Err(format!(
                     "Event {} previous_event_hash does not reference an event in the package.",
                     ev.event_id
                 ));
+            }
+            let count = children.entry(prev.as_str()).or_default();
+            *count += 1;
+            if *count > 1 {
+                return Err(format!("Package event chain forks at hash {prev}."));
             }
         }
     }
@@ -478,7 +767,29 @@ fn verify_event_chain(payload: &SoulExportPayload) -> Result<(), String> {
         .head_event_hash
         .as_deref()
         .ok_or("Package event chain has no head event hash.".to_string())?;
-    if last_hash.as_deref() != Some(head) {
+    let mut current = root;
+    let mut visited = std::collections::HashSet::new();
+    loop {
+        if !visited.insert(current.content_hash.as_str()) {
+            return Err("Package event chain contains a cycle.".to_string());
+        }
+        match children.get(current.content_hash.as_str()) {
+            None => break,
+            Some(_) => {
+                current = payload
+                    .events
+                    .iter()
+                    .find(|ev| {
+                        ev.previous_event_hash.as_deref() == Some(current.content_hash.as_str())
+                    })
+                    .ok_or("Package event chain is disconnected.".to_string())?;
+            }
+        }
+    }
+    if visited.len() != payload.events.len() {
+        return Err("Package event chain is disconnected or cyclic.".to_string());
+    }
+    if current.content_hash != head {
         return Err("Package head event hash does not match the event chain.".into());
     }
     Ok(())
@@ -609,8 +920,28 @@ pub fn verify_package_bytes(
     if payload.format != PAYLOAD_FORMAT {
         return Err("Unknown payload format.".into());
     }
-    if payload.version != PAYLOAD_VERSION {
+    if payload.version != PAYLOAD_VERSION && payload.version != LEGACY_PAYLOAD_VERSION {
         return Err(format!("Unsupported payload version: {}.", payload.version));
+    }
+    for (name, value) in [
+        ("soul id", payload.soul.soul_id.as_str()),
+        ("display name", payload.soul.display_name.as_str()),
+        ("device id", payload.soul.device_id.as_str()),
+        ("created at", payload.soul.created_at.as_str()),
+    ] {
+        if value.is_empty() || value.chars().count() > MAX_MANIFEST_FIELD_CHARS {
+            return Err(format!("Package {name} is empty or too long."));
+        }
+    }
+    if payload.soul.entity_count != payload.entities.len() as i64 {
+        return Err("Package entity count does not match the entity list.".to_string());
+    }
+    validate_package_counts(payload.entities.len(), payload.events.len())?;
+    validate_archive_state(&payload)?;
+    if payload.calibration.answers.len() > 256 * 1024
+        || !(0..=100).contains(&payload.calibration.step)
+    {
+        return Err("Package calibration data exceeds allowed limits.".to_string());
     }
     if payload.soul.soul_id != envelope.soul_id {
         return Err("Package soul ID does not match its manifest.".into());
@@ -624,7 +955,72 @@ pub fn verify_package_bytes(
     })
 }
 
+fn validate_archive_state(payload: &SoulExportPayload) -> Result<(), String> {
+    if payload.version == LEGACY_PAYLOAD_VERSION {
+        return Ok(());
+    }
+    if payload.evaluations.len() > 10_000
+        || payload.policies.len() > crate::policy::MAX_POLICY_RULES
+        || payload.gateway_connectors.len() > crate::gateway::MAX_GATEWAY_CONNECTORS
+        || payload.gateway_receipts.len() > crate::gateway::MAX_GATEWAY_RECEIPTS
+    {
+        return Err("Package archive state exceeds allowed limits.".to_string());
+    }
+    for evaluation in &payload.evaluations {
+        if evaluation.soul_id != payload.soul.soul_id {
+            return Err("Package evaluation belongs to a different SOUL.".to_string());
+        }
+        if evaluation.scenario_text.chars().count() > crate::eval::MAX_SCENARIO_CHARS
+            || evaluation.soul_answer.chars().count() > crate::eval::MAX_VARIANT_ANSWER_CHARS
+            || evaluation.baseline_answer.chars().count() > crate::eval::MAX_VARIANT_ANSWER_CHARS
+            || evaluation.baseline_profile.chars().count() > crate::eval::MAX_BASELINE_PROFILE_CHARS
+            || evaluation.context_pack.chars().count() > crate::eval::MAX_CONTEXT_PACK_CHARS
+            || evaluation.context_entity_ids.len() > crate::eval::MAX_CONTEXT_ENTITY_IDS
+            || !matches!(evaluation.soul_variant.as_str(), "a" | "b")
+            || !evaluation
+                .user_choice
+                .as_deref()
+                .map(|v| matches!(v, "a" | "b" | "neither"))
+                .unwrap_or(true)
+        {
+            return Err("Package evaluation data is invalid.".to_string());
+        }
+    }
+    for policy in &payload.policies {
+        if policy.rule_json.chars().count() > crate::policy::MAX_RULE_JSON_CHARS {
+            return Err("Package policy is too large.".to_string());
+        }
+        let rule: crate::policy::SoulRule = serde_json::from_str(&policy.rule_json)
+            .map_err(|_| "Package policy is invalid.".to_string())?;
+        rule.validate()?;
+        if rule.id != policy.id || rule.priority != policy.priority {
+            return Err("Package policy columns do not match its rule.".to_string());
+        }
+    }
+    for connector in &payload.gateway_connectors {
+        if connector.connector_id.is_empty()
+            || connector.account_id.is_empty()
+            || connector.environment.is_empty()
+            || connector.connector_id.chars().count() > crate::gateway::MAX_CHANNEL_FIELD_CHARS
+            || connector.account_id.chars().count() > crate::gateway::MAX_CHANNEL_FIELD_CHARS
+            || connector.environment.chars().count() > crate::gateway::MAX_CHANNEL_FIELD_CHARS
+        {
+            return Err("Package gateway connector is invalid.".to_string());
+        }
+    }
+    Ok(())
+}
+
+#[cfg(test)]
 pub fn inspect_package_file(path: &Path, password: &str) -> Result<ImportPreview, String> {
+    inspect_package_file_with_content_hash(path, password).map(|(preview, _)| preview)
+}
+
+pub fn inspect_package_file_with_content_hash(
+    path: &Path,
+    password: &str,
+) -> Result<(ImportPreview, String), String> {
+    validate_path_extension(path, &["soul"])?;
     let bytes = crypto::read_file_limited(path, MAX_PACKAGE_BYTES)?;
     let vp = verify_package_bytes(&bytes, password, MAX_PACKAGE_BYTES)?;
     let mut counts: Vec<EntityCount> = Vec::new();
@@ -637,7 +1033,7 @@ pub fn inspect_package_file(path: &Path, password: &str) -> Result<ImportPreview
             }),
         }
     }
-    Ok(ImportPreview {
+    let preview = ImportPreview {
         soul_id: vp.payload.soul.soul_id,
         display_name: vp.payload.soul.display_name,
         created_at: vp.payload.soul.created_at,
@@ -649,45 +1045,42 @@ pub fn inspect_package_file(path: &Path, password: &str) -> Result<ImportPreview
         activated: vp.payload.calibration.activated,
         head_event_hash: vp.payload.soul.head_event_hash,
         entity_counts: counts,
-    })
+        partial_restore: vp.payload.version == LEGACY_PAYLOAD_VERSION,
+    };
+    Ok((preview, vp.content_hash))
 }
 
+#[cfg(test)]
 pub fn import_package_file(
     conn: &mut rusqlite::Connection,
     path: &Path,
     password: &str,
 ) -> Result<db::SoulManifest, String> {
+    import_package_file_internal(conn, path, password, None)
+}
+
+pub fn import_package_file_with_content_hash(
+    conn: &mut rusqlite::Connection,
+    path: &Path,
+    password: &str,
+    expected_content_hash: &str,
+) -> Result<db::SoulManifest, String> {
+    import_package_file_internal(conn, path, password, Some(expected_content_hash))
+}
+
+fn import_package_file_internal(
+    conn: &mut rusqlite::Connection,
+    path: &Path,
+    password: &str,
+    expected_content_hash: Option<&str>,
+) -> Result<db::SoulManifest, String> {
+    validate_path_extension(path, &["soul"])?;
     let bytes = crypto::read_file_limited(path, MAX_PACKAGE_BYTES)?;
     let vp = verify_package_bytes(&bytes, password, MAX_PACKAGE_BYTES)?;
-    let content_hash = vp.content_hash.clone();
-    let payload = vp.payload;
-
-    // Кеш извлечения по hash содержимого (SESSION-14): если этот пакет уже был
-    // импортирован и с тех пор состояние не менялось — повторный импорт не
-    // пересобирает данные (нет wipe, нет FTS-переиндексации, нет новых
-    // квитанций). Пакет по-прежнему полностью проверен выше (подпись,
-    // формат, KDF, цепочка, сущности) — быстрый путь никогда не пропускает
-    // верификацию, только повторное применение.
-    let already_current = {
-        let current_rev = db::state_revision(conn).map_err(|e| e.to_string())?;
-        db::get_meta(conn, db::META_IMPORTED_CONTENT_HASH)
-            .map_err(|e| e.to_string())?
-            .as_deref()
-            == Some(content_hash.as_str())
-            && db::get_meta(conn, db::META_IMPORTED_SOUL_ID)
-                .map_err(|e| e.to_string())?
-                .as_deref()
-                == Some(payload.soul.soul_id.as_str())
-            && db::get_meta(conn, db::META_IMPORTED_STATE_REVISION)
-                .map_err(|e| e.to_string())?
-                .and_then(|v| v.parse::<i64>().ok())
-                == Some(current_rev)
-    };
-    if already_current {
-        return db::get_soul(conn, &payload.soul.soul_id)
-            .map_err(|e| e.to_string())?
-            .ok_or("Restored SOUL could not be read back.".to_string());
+    if expected_content_hash.is_some_and(|expected| expected != vp.content_hash) {
+        return Err("Backup changed after preview; choose and review it again.".to_string());
     }
+    let payload = vp.payload;
 
     let tx = conn.transaction().map_err(|e| e.to_string())?;
     db::wipe_all_tx(&tx).map_err(|e| e.to_string())?;
@@ -710,8 +1103,8 @@ pub fn import_package_file(
 
     for ev in &payload.events {
         tx.execute(
-            "INSERT INTO events (event_id, soul_id, device_id, actor, hlc, operation, entity_type, entity_id, payload, provenance_ids, previous_event_hash, content_hash, signature, created_at)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14)",
+            "INSERT INTO events (event_id, soul_id, device_id, actor, hlc, operation, entity_type, entity_id, payload, provenance_ids, previous_event_hash, content_hash, hash_version, signature, created_at)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15)",
             rusqlite::params![
                 ev.event_id,
                 ev.soul_id,
@@ -725,6 +1118,7 @@ pub fn import_package_file(
                 serde_json::to_string(&ev.provenance_ids).unwrap_or_else(|_| "[]".into()),
                 ev.previous_event_hash,
                 ev.content_hash,
+                ev.hash_version,
                 ev.signature,
                 ev.created_at
             ],
@@ -750,34 +1144,75 @@ pub fn import_package_file(
     }
 
     tx.execute(
-        "INSERT INTO soul_state (soul_id, activated, calibration_step, calibration_answers)
-         VALUES (?1, ?2, ?3, ?4)",
+        "INSERT INTO soul_state (soul_id, activated, calibration_step, calibration_answers, preview_confirmed)
+         VALUES (?1, ?2, ?3, ?4, ?5)",
         rusqlite::params![
             payload.soul.soul_id,
             if payload.calibration.activated { 1 } else { 0 },
             payload.calibration.step,
-            payload.calibration.answers
+            payload.calibration.answers,
+            if payload.calibration.activated { 1 } else { 0 }
         ],
     )
     .map_err(|e| e.to_string())?;
 
-    tx.commit().map_err(|e| e.to_string())?;
-
-    // Метаданные быстрого пути — после успешного импорта, той же транзакцией
-    // (ревизия уже обновлена wipe_all_tx внутри неё). Сбой записи метаданных
-    // откатывает весь импорт: целостность дороже скорости.
-    let tx = conn.transaction().map_err(|e| e.to_string())?;
-    let revision = db::state_revision(&tx).map_err(|e| e.to_string())?;
-    db::set_meta(&tx, db::META_IMPORTED_CONTENT_HASH, &content_hash).map_err(|e| e.to_string())?;
-    db::set_meta(&tx, db::META_IMPORTED_SOUL_ID, &payload.soul.soul_id)
-        .map_err(|e| e.to_string())?;
-    db::set_meta(&tx, db::META_IMPORTED_STATE_REVISION, &revision.to_string())
-        .map_err(|e| e.to_string())?;
+    if payload.version == LEGACY_PAYLOAD_VERSION {
+        crate::policy::init_policies(&tx).map_err(|e| e.to_string())?;
+        crate::gateway::init_gateway(&tx).map_err(|e| e.to_string())?;
+    } else {
+        restore_archive_state(&tx, &payload)?;
+    }
+    db::set_meta(&tx, db::META_ACTIVE_SOUL_ID, &payload.soul.soul_id).map_err(|e| e.to_string())?;
     tx.commit().map_err(|e| e.to_string())?;
 
     db::get_soul(conn, &payload.soul.soul_id)
         .map_err(|e| e.to_string())?
         .ok_or("Restored SOUL could not be read back.".to_string())
+}
+
+fn restore_archive_state(
+    tx: &rusqlite::Transaction<'_>,
+    payload: &SoulExportPayload,
+) -> Result<(), String> {
+    for evaluation in &payload.evaluations {
+        tx.execute(
+            "INSERT INTO evaluations (id, soul_id, scenario_id, scenario_text, domain, soul_variant, soul_answer, baseline_answer, baseline_profile, context_pack, context_entity_ids, user_choice, completed_at, created_at) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14)",
+            rusqlite::params![evaluation.id, evaluation.soul_id, evaluation.scenario_id, evaluation.scenario_text, evaluation.domain, evaluation.soul_variant, evaluation.soul_answer, evaluation.baseline_answer, evaluation.baseline_profile, evaluation.context_pack, serde_json::to_string(&evaluation.context_entity_ids).map_err(|e| e.to_string())?, evaluation.user_choice, evaluation.completed_at, evaluation.created_at],
+        ).map_err(|e| format!("Cannot restore evaluation: {e}"))?;
+    }
+    for policy in &payload.policies {
+        tx.execute(
+            "INSERT INTO policies (id, priority, enabled, rule_json, created_at, updated_at) VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+            rusqlite::params![policy.id, policy.priority, if policy.enabled { 1 } else { 0 }, policy.rule_json, policy.created_at, policy.updated_at],
+        ).map_err(|e| format!("Cannot restore policy: {e}"))?;
+    }
+    for (key, value) in &payload.policy_meta {
+        tx.execute(
+            "INSERT INTO policy_meta (key, value) VALUES (?1, ?2)",
+            rusqlite::params![key, value],
+        )
+        .map_err(|e| format!("Cannot restore policy metadata: {e}"))?;
+    }
+    for connector in &payload.gateway_connectors {
+        tx.execute("INSERT INTO gateway_connectors (connector_id, account_id, environment) VALUES (?1, ?2, ?3)", rusqlite::params![connector.connector_id, connector.account_id, connector.environment])
+            .map_err(|e| format!("Cannot restore gateway connector: {e}"))?;
+    }
+    for (key, value) in &payload.gateway_meta {
+        tx.execute(
+            "INSERT INTO gateway_meta (key, value) VALUES (?1, ?2)",
+            rusqlite::params![key, value],
+        )
+        .map_err(|e| format!("Cannot restore gateway metadata: {e}"))?;
+    }
+    for receipt in &payload.gateway_receipts {
+        tx.execute(
+            "INSERT INTO gateway_receipts (id, capability_id, action_id, kind, status, decision_effect, rule_id, message, connector_executed, reason, nonce, created_at, signature, signer_public_key) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14)",
+            rusqlite::params![receipt.id, receipt.capability_id, receipt.action_id, receipt.kind, receipt.status, receipt.decision_effect, receipt.rule_id, receipt.message, if receipt.connector_executed { 1 } else { 0 }, receipt.reason, receipt.nonce, receipt.created_at, receipt.signature, receipt.signer_public_key],
+        ).map_err(|e| format!("Cannot restore gateway receipt: {e}"))?;
+    }
+    // Capabilities are one-time, device-signed runtime grants. They are never
+    // portable: restore deliberately revokes them instead of replaying grants.
+    Ok(())
 }
 
 pub fn export_json(
@@ -786,6 +1221,7 @@ pub fn export_json(
     path: &Path,
 ) -> Result<JsonExportReceipt, String> {
     validate_export_path(path)?;
+    validate_path_extension(path, &["json"])?;
     let payload = build_export_payload(conn, soul_id)?;
     let doc = serde_json::json!({
         "exportedAt": Utc::now().to_rfc3339(),
@@ -796,8 +1232,8 @@ pub fn export_json(
         "calibration": payload.calibration,
     });
     let text = serde_json::to_string_pretty(&doc).map_err(|e| format!("Serialize failed: {e}"))?;
-    fs::write(path, text).map_err(|e| format!("Cannot write export file: {e}"))?;
-    let size = fs::metadata(path).map(|m| m.len() as usize).unwrap_or(0);
+    atomic_write(path, text.as_bytes())?;
+    let size = text.len();
     Ok(JsonExportReceipt {
         path: path.to_string_lossy().to_string(),
         size_bytes: size,
@@ -820,6 +1256,7 @@ pub fn export_markdown(
     path: &Path,
 ) -> Result<MarkdownExportReceipt, String> {
     validate_export_path(path)?;
+    validate_path_extension(path, &["md", "markdown"])?;
     let payload = build_export_payload(conn, soul_id)?;
     let mut out = String::new();
 
@@ -869,8 +1306,8 @@ pub fn export_markdown(
         out.push('\n');
     }
 
-    fs::write(path, &out).map_err(|e| format!("Cannot write export file: {e}"))?;
-    let size = fs::metadata(path).map(|m| m.len() as usize).unwrap_or(0);
+    atomic_write(path, out.as_bytes())?;
+    let size = out.len();
     Ok(MarkdownExportReceipt {
         path: path.to_string_lossy().to_string(),
         size_bytes: size,
@@ -882,10 +1319,20 @@ pub fn wipe_local_data(
     app_dir: &Path,
     soul_id: &str,
 ) -> Result<DeletionReceipt, String> {
-    let (entity_count, event_count) = db::count_soul(conn, soul_id).map_err(|e| e.to_string())?;
+    let souls = db::list_souls(conn).map_err(|e| e.to_string())?;
+    if souls.is_empty() || !souls.iter().any(|s| s.soul_id == soul_id) {
+        return Err("SOUL not found; global deletion was not performed.".to_string());
+    }
+    let entity_count: i64 = conn
+        .query_row("SELECT COUNT(*) FROM entities", [], |r| r.get(0))
+        .map_err(|e| e.to_string())?;
+    let event_count: i64 = conn
+        .query_row("SELECT COUNT(*) FROM events", [], |r| r.get(0))
+        .map_err(|e| e.to_string())?;
     db::wipe_all(conn).map_err(|e| e.to_string())?;
-
-    let keys_deleted = crypto::delete_device_keys(app_dir).is_ok();
+    // The SQLCipher key remains so the now-empty database can be opened safely
+    // on the next launch. Deleting it would intentionally make the DB unreadable.
+    let keys_deleted = false;
 
     let receipt = DeletionReceipt {
         deleted_at: Utc::now().to_rfc3339(),
@@ -1017,6 +1464,17 @@ mod tests {
         let signature = crypto::sign_bytes(&keys.private_bytes, &to_sign);
         envelope.signature = Some(B64.encode(signature));
         serde_json::to_vec(&envelope).unwrap()
+    }
+
+    fn rehash_as_legacy_v1(payload: &mut SoulExportPayload) {
+        let mut previous = None;
+        for event in &mut payload.events {
+            event.hash_version = 1;
+            event.previous_event_hash = previous;
+            event.content_hash = db::event_content_hash(event);
+            previous = Some(event.content_hash.clone());
+        }
+        payload.soul.head_event_hash = previous;
     }
 
     #[test]
@@ -1205,11 +1663,123 @@ mod tests {
         assert_eq!(restored.entity_count, 2);
         assert_eq!(get_calibration(&env.conn, &soul_id).unwrap().0, 2);
         assert!(is_soul_activated(&env.conn, &soul_id).unwrap());
+        assert!(db::get_soul_state(&env.conn, &soul_id).unwrap().3);
+        assert_eq!(crate::policy::list_policies(&env.conn).unwrap().len(), 2);
         let entities = list_entities(&env.conn, &soul_id).unwrap();
         assert_eq!(entities.len(), 2);
         assert!(entities.iter().any(|e| e.entity_type == "boundary"));
         let events = list_events(&env.conn, &soul_id).unwrap();
         assert!(events.len() >= 3);
+    }
+
+    #[test]
+    fn full_archive_restores_evaluations_policies_and_gateway_audit_state() {
+        let mut env = TestEnv::new();
+        let soul_id = create_seeded_soul(&mut env);
+        let custom_policy = r#"{"id":"policy_archive_custom","priority":42,"when":{"eq":["action.kind","note.create"]},"effect":"redact","message":"archive me"}"#;
+        crate::policy::create_policy(&env.conn, custom_policy).unwrap();
+        crate::policy::set_policy_enabled(&env.conn, "policy_archive_custom", false).unwrap();
+        crate::eval::create_evaluation(
+            &env.conn,
+            &soul_id,
+            "archive",
+            "Archive scenario",
+            "work",
+            "SOUL answer",
+            "Baseline answer",
+            "B1",
+            "context",
+            &[],
+        )
+        .unwrap();
+        crate::gateway::add_connector(&env.conn, "archive", "acct", "staging").unwrap();
+        let keys = crypto::ensure_device_keypair(&env.dir).unwrap();
+        crate::gateway::propose_action(
+            &env.conn,
+            &keys,
+            r#"{"actionId":"archive-action","kind":"note.create","actor":"user","connectorId":"archive","accountId":"acct","environment":"staging","recipient":null,"domain":null,"amount":null,"currency":null,"dataClasses":[],"reversible":true,"confirmedByUser":false,"requestedScopes":[],"payloadHash":"ignored"}"#,
+            None,
+        )
+        .unwrap();
+        let path = export_fast(&env, &soul_id);
+
+        db::wipe_all(&env.conn).unwrap();
+        import_package_file(&mut env.conn, &path, PASSWORD).unwrap();
+
+        assert_eq!(
+            crate::eval::list_evaluations(&env.conn, &soul_id)
+                .unwrap()
+                .len(),
+            1
+        );
+        let policy = crate::policy::list_policies(&env.conn)
+            .unwrap()
+            .into_iter()
+            .find(|row| row.id == "policy_archive_custom")
+            .unwrap();
+        assert!(!policy.enabled);
+        assert!(crate::gateway::list_connectors(&env.conn)
+            .unwrap()
+            .iter()
+            .any(|channel| channel.connector_id == "archive"));
+        assert_eq!(crate::gateway::list_receipts(&env.conn).unwrap().len(), 1);
+        assert!(crate::gateway::list_capabilities(&env.conn)
+            .unwrap()
+            .is_empty());
+    }
+
+    #[test]
+    fn legacy_core_only_archive_is_marked_partial_and_reseeds_local_defaults() {
+        let mut env = TestEnv::new();
+        let soul_id = create_seeded_soul(&mut env);
+        let path = export_fast(&env, &soul_id);
+        let mut payload =
+            verify_package_bytes(&std::fs::read(&path).unwrap(), PASSWORD, MAX_PACKAGE_BYTES)
+                .unwrap()
+                .payload;
+        payload.version = LEGACY_PAYLOAD_VERSION.to_string();
+        payload.evaluations.clear();
+        payload.policies.clear();
+        payload.policy_meta.clear();
+        payload.gateway_connectors.clear();
+        payload.gateway_meta.clear();
+        payload.gateway_receipts.clear();
+        let legacy = env.dir.join("legacy-core.soul");
+        std::fs::write(&legacy, package_from_payload(&env, &payload)).unwrap();
+
+        assert!(
+            inspect_package_file(&legacy, PASSWORD)
+                .unwrap()
+                .partial_restore
+        );
+        import_package_file(&mut env.conn, &legacy, PASSWORD).unwrap();
+        assert_eq!(crate::policy::list_policies(&env.conn).unwrap().len(), 2);
+        assert_eq!(crate::gateway::list_connectors(&env.conn).unwrap().len(), 4);
+    }
+
+    #[test]
+    fn import_rejects_package_replaced_after_preview() {
+        let mut env = TestEnv::new();
+        let soul_id = create_seeded_soul(&mut env);
+        let path = export_fast(&env, &soul_id);
+        let (_, expected_hash) = inspect_package_file_with_content_hash(&path, PASSWORD).unwrap();
+
+        let bytes = std::fs::read(&path).unwrap();
+        let mut payload = verify_package_bytes(&bytes, PASSWORD, MAX_PACKAGE_BYTES)
+            .unwrap()
+            .payload;
+        payload.soul.display_name = "Replaced after preview".to_string();
+        std::fs::write(&path, package_from_payload(&env, &payload)).unwrap();
+
+        let err =
+            import_package_file_with_content_hash(&mut env.conn, &path, PASSWORD, &expected_hash)
+                .unwrap_err();
+        assert!(
+            err.contains("changed after preview"),
+            "unexpected error: {err}"
+        );
+        assert_eq!(list_souls(&env.conn).unwrap().len(), 1);
+        assert_eq!(list_entities(&env.conn, &soul_id).unwrap().len(), 2);
     }
 
     #[test]
@@ -1225,6 +1795,7 @@ mod tests {
         // SOUL обязан уцелеть.
         let mut payload = vp.payload.clone();
         payload.entities.push(payload.entities[0].clone());
+        payload.soul.entity_count = payload.entities.len() as i64;
         let bad_path = env.dir.join("dup-entities.soul");
         std::fs::write(&bad_path, package_from_payload(&env, &payload)).unwrap();
 
@@ -1416,7 +1987,8 @@ mod tests {
         let vp = verify_package_bytes(&bytes, PASSWORD, MAX_PACKAGE_BYTES).unwrap();
 
         let mut payload = vp.payload.clone();
-        payload.events[1].previous_event_hash = Some("deadbeef".to_string());
+        rehash_as_legacy_v1(&mut payload);
+        payload.events[1].previous_event_hash = Some("d".repeat(64));
         let err = verify_package_bytes(
             &package_from_payload(&env, &payload),
             PASSWORD,
@@ -1438,6 +2010,7 @@ mod tests {
         let vp = verify_package_bytes(&bytes, PASSWORD, MAX_PACKAGE_BYTES).unwrap();
 
         let mut payload = vp.payload.clone();
+        rehash_as_legacy_v1(&mut payload);
         payload.events[0].previous_event_hash = Some(payload.events[0].content_hash.clone());
         let err = verify_package_bytes(
             &package_from_payload(&env, &payload),
@@ -1446,6 +2019,121 @@ mod tests {
         )
         .unwrap_err();
         assert!(err.contains("exactly one root"), "unexpected error: {err}");
+    }
+
+    #[test]
+    fn forked_event_chain_is_rejected() {
+        let mut env = TestEnv::new();
+        let soul_id = create_seeded_soul(&mut env);
+        let path = export_fast(&env, &soul_id);
+        let bytes = std::fs::read(&path).unwrap();
+        let vp = verify_package_bytes(&bytes, PASSWORD, MAX_PACKAGE_BYTES).unwrap();
+
+        let mut payload = vp.payload.clone();
+        rehash_as_legacy_v1(&mut payload);
+        assert!(payload.events.len() >= 3);
+        let root_hash = payload
+            .events
+            .iter()
+            .find(|event| event.previous_event_hash.is_none())
+            .unwrap()
+            .content_hash
+            .clone();
+        payload.events[1].previous_event_hash = Some(root_hash.clone());
+        payload.events[2].previous_event_hash = Some(root_hash);
+        let err = verify_package_bytes(
+            &package_from_payload(&env, &payload),
+            PASSWORD,
+            MAX_PACKAGE_BYTES,
+        )
+        .unwrap_err();
+        assert!(err.contains("forks"), "unexpected error: {err}");
+    }
+
+    #[test]
+    fn event_chain_verification_is_independent_of_array_order() {
+        let mut env = TestEnv::new();
+        let soul_id = create_seeded_soul(&mut env);
+        let path = export_fast(&env, &soul_id);
+        let bytes = std::fs::read(&path).unwrap();
+        let vp = verify_package_bytes(&bytes, PASSWORD, MAX_PACKAGE_BYTES).unwrap();
+
+        let mut payload = vp.payload.clone();
+        payload.events.reverse();
+        verify_package_bytes(
+            &package_from_payload(&env, &payload),
+            PASSWORD,
+            MAX_PACKAGE_BYTES,
+        )
+        .unwrap();
+    }
+
+    #[test]
+    fn legacy_v1_event_hashes_still_verify_and_import() {
+        let mut env = TestEnv::new();
+        let soul_id = create_seeded_soul(&mut env);
+        let path = export_fast(&env, &soul_id);
+        let bytes = std::fs::read(&path).unwrap();
+        let mut payload = verify_package_bytes(&bytes, PASSWORD, MAX_PACKAGE_BYTES)
+            .unwrap()
+            .payload;
+
+        rehash_as_legacy_v1(&mut payload);
+        let legacy_path = env.dir.join("legacy-v1.soul");
+        std::fs::write(&legacy_path, package_from_payload(&env, &payload)).unwrap();
+
+        verify_package_bytes(
+            &std::fs::read(&legacy_path).unwrap(),
+            PASSWORD,
+            MAX_PACKAGE_BYTES,
+        )
+        .unwrap();
+        import_package_file(&mut env.conn, &legacy_path, PASSWORD).unwrap();
+        assert!(list_events(&env.conn, &soul_id)
+            .unwrap()
+            .iter()
+            .all(|event| event.hash_version == 1));
+    }
+
+    #[test]
+    fn repeated_transition_payloads_export_with_unique_v2_hashes() {
+        let env = TestEnv::new();
+        let soul = create_soul(&env.conn, "Repeat transition", "device_t1").unwrap();
+        let entity = add_entity(
+            &env.conn,
+            &soul.soul_id,
+            "preference",
+            "candidate",
+            r#"{"claim":"Prefer concise answers"}"#,
+            "device_t1",
+        )
+        .unwrap();
+        for status in ["active", "candidate", "active", "candidate"] {
+            db::update_entity(
+                &env.conn,
+                &soul.soul_id,
+                &entity.id,
+                status,
+                None,
+                "device_t1",
+            )
+            .unwrap();
+        }
+
+        let path = export_fast(&env, &soul.soul_id);
+        let payload =
+            verify_package_bytes(&std::fs::read(path).unwrap(), PASSWORD, MAX_PACKAGE_BYTES)
+                .unwrap()
+                .payload;
+        let repeated: Vec<_> = payload
+            .events
+            .iter()
+            .filter(|event| event.operation == "candidate.reopened")
+            .collect();
+        assert_eq!(repeated.len(), 2);
+        assert_eq!(repeated[0].payload, repeated[1].payload);
+        assert_ne!(repeated[0].content_hash, repeated[1].content_hash);
+        assert!(repeated.iter().all(|event| event.hash_version == 2));
     }
 
     #[test]
@@ -1487,6 +2175,37 @@ mod tests {
         assert!(text.contains("&lt;img src=x onerror=alert(1)&gt;"));
         assert!(text.contains("&amp;"));
         assert!(text.contains("&quot;"));
+    }
+
+    #[test]
+    fn exports_replace_existing_files_without_leaving_temporary_files() {
+        let mut env = TestEnv::new();
+        let soul_id = create_seeded_soul(&mut env);
+        let path = env.dir.join("replace.json");
+        std::fs::write(&path, "old partial content").unwrap();
+
+        let receipt = export_json(&env.conn, &soul_id, &path).unwrap();
+        let bytes = std::fs::read(&path).unwrap();
+        serde_json::from_slice::<serde_json::Value>(&bytes).unwrap();
+        assert_eq!(receipt.size_bytes, bytes.len());
+        assert!(!String::from_utf8_lossy(&bytes).contains("old partial content"));
+        let leftovers: Vec<_> = std::fs::read_dir(&env.dir)
+            .unwrap()
+            .flatten()
+            .filter(|entry| entry.file_name().to_string_lossy().contains("soul-tmp"))
+            .collect();
+        assert!(leftovers.is_empty());
+    }
+
+    #[test]
+    fn export_and_import_share_package_count_limits() {
+        assert!(validate_package_counts(MAX_PACKAGE_ENTITIES, MAX_PACKAGE_EVENTS).is_ok());
+        assert!(validate_package_counts(MAX_PACKAGE_ENTITIES + 1, 0)
+            .unwrap_err()
+            .contains("entities"));
+        assert!(validate_package_counts(0, MAX_PACKAGE_EVENTS + 1)
+            .unwrap_err()
+            .contains("events"));
     }
 
     #[test]
@@ -1538,9 +2257,9 @@ mod tests {
                 "claim must roundtrip verbatim: {inj}"
             );
         }
-        // Инъекционные тексты остались данными: ни одного правила политики
-        // не появилось (дефолты засеяны только в init, импорт их не трогает).
-        assert_eq!(crate::policy::list_policies(&env.conn).unwrap().len(), 0);
+        // Инъекционные тексты остались данными, а обязательные локальные
+        // политики были заново засеяны после атомарного импорта.
+        assert_eq!(crate::policy::list_policies(&env.conn).unwrap().len(), 2);
     }
 
     #[test]
@@ -1567,7 +2286,7 @@ mod tests {
     }
 
     #[test]
-    fn wipe_removes_data_keys_and_writes_receipt() {
+    fn wipe_removes_data_preserves_installation_key_and_writes_receipt() {
         let mut env = TestEnv::new();
         let soul_id = create_seeded_soul(&mut env);
         let _ = export_fast(&env, &soul_id);
@@ -1575,18 +2294,18 @@ mod tests {
 
         let receipt = wipe_local_data(&env.conn, &env.dir, &soul_id).unwrap();
         assert_eq!(receipt.entity_count, 2);
-        assert!(receipt.keys_deleted);
+        assert!(!receipt.keys_deleted);
 
         assert!(list_souls(&env.conn).unwrap().is_empty());
         assert!(list_entities(&env.conn, &soul_id).unwrap().is_empty());
-        assert!(!crypto::keys_dir(&env.dir).exists());
+        assert!(crypto::keys_dir(&env.dir).exists());
         let receipts_dir = env.dir.join("receipts");
         assert!(receipts_dir.exists());
         let files: Vec<_> = std::fs::read_dir(&receipts_dir).unwrap().collect();
         assert_eq!(files.len(), 1);
 
-        // Эмуляция перезапуска приложения: соединение закрывается, и init_db
-        // должен без ключей (после wipe) получить чистую пустую базу.
+        // Эмуляция перезапуска приложения: installation key сохранён, поэтому
+        // очищенная SQLCipher-БД снова открывается без потери recoverability.
         let old = std::mem::replace(
             &mut env.conn,
             rusqlite::Connection::open_in_memory().unwrap(),
@@ -1618,7 +2337,7 @@ mod tests {
         assert!(r.file.starts_with("deletion-"));
         assert_eq!(r.kind, "deletion");
         assert_eq!(r.entity_count, 2);
-        assert_eq!(r.keys_deleted, Some(true));
+        assert_eq!(r.keys_deleted, Some(false));
     }
 
     #[test]
@@ -1690,73 +2409,14 @@ mod tests {
     }
 
     #[test]
-    fn reimport_is_idempotent() {
-        let mut env = TestEnv::new();
-        let soul_id = create_seeded_soul(&mut env);
-        let path1 = export_fast(&env, &soul_id);
-        import_package_file(&mut env.conn, &path1, PASSWORD).unwrap();
-        let path2 = env.dir.join("backup2.soul");
-        export_package_with_params(
-            &env.conn,
-            &env.dir,
-            &soul_id,
-            PASSWORD,
-            &path2,
-            Some(FAST_KDF),
-        )
-        .unwrap();
-        let bytes2 = std::fs::read(&path2).unwrap();
-        let vp = verify_package_bytes(&bytes2, PASSWORD, MAX_PACKAGE_BYTES).unwrap();
-        assert_eq!(vp.payload.entities.len(), 2);
-        assert_eq!(
-            vp.payload.events.len(),
-            std::fs::read(&path1)
-                .map(|b| {
-                    verify_package_bytes(&b, PASSWORD, MAX_PACKAGE_BYTES)
-                        .unwrap()
-                        .payload
-                        .events
-                        .len()
-                })
-                .unwrap()
-        );
-    }
-
-    #[test]
-    fn reimport_same_file_is_fast_path_without_rewrite() {
-        let mut env = TestEnv::new();
-        let soul_id = create_seeded_soul(&mut env);
-        let path = export_fast(&env, &soul_id);
-
-        let first = import_package_file(&mut env.conn, &path, PASSWORD).unwrap();
-        let rev_after_first = db::state_revision(&env.conn).unwrap();
-        assert!(rev_after_first > 0);
-        assert!(db::get_meta(&env.conn, db::META_IMPORTED_CONTENT_HASH)
-            .unwrap()
-            .is_some());
-
-        // Второй импорт того же файла: верификация выполнена, но данные не
-        // пересобираются — ревизия состояния не должна измениться (полный
-        // путь wipe_all_tx повышает её).
-        let second = import_package_file(&mut env.conn, &path, PASSWORD).unwrap();
-        assert_eq!(first.soul_id, second.soul_id);
-        assert_eq!(db::state_revision(&env.conn).unwrap(), rev_after_first);
-        assert_eq!(
-            db::list_entities(&env.conn, &soul_id).unwrap().len(),
-            2,
-            "fast path must not duplicate or drop entities"
-        );
-    }
-
-    #[test]
-    fn import_after_mutation_rewrites_data() {
+    fn repeated_import_rewrites_data_after_local_mutation() {
         let mut env = TestEnv::new();
         let soul_id = create_seeded_soul(&mut env);
         let path = export_fast(&env, &soul_id);
         import_package_file(&mut env.conn, &path, PASSWORD).unwrap();
 
-        // Мутация после импорта делает быстрый путь неприменимым: повторный
-        // импорт того же файла обязан перезаписать состояние из пакета.
+        // Повторный импорт всегда применяет полностью проверенный пакет и
+        // перезаписывает локальные изменения, а не доверяет кэшу метаданных.
         let soul = db::get_soul(&env.conn, &soul_id).unwrap().unwrap();
         db::add_entity(
             &env.conn,

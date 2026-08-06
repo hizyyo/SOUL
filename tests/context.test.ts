@@ -85,12 +85,13 @@ describe('relevance and text filter', () => {
 });
 
 describe('sensitivity gate', () => {
-  it('excludes restricted entities unless explicitly allowed', () => {
+  it('excludes sensitive and restricted entities unless explicitly allowed', () => {
     const secret = entityData(dataFor({ sensitivity: 'restricted', questionId: 'pref_sec' }));
+    const sensitive = entityData(dataFor({ sensitivity: 'sensitive', questionId: 'pref_sensitive' }));
     const normal = entityData(dataFor({ sensitivity: 'private', questionId: 'pref_norm' }), {
       updated_at: '2026-07-02T00:00:00Z',
     });
-    const pack = compileContext([secret, normal], query({}));
+    const pack = compileContext([secret, sensitive, normal], query({}));
     expect(pack.items.map((i) => i.id)).toEqual([normal.id]);
   });
 

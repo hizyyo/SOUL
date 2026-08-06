@@ -25,12 +25,11 @@ export const CONTEXT_HARD_MAX_TOKENS = 3_000;
 /** Статусы, разрешённые в контексте по умолчанию: только разрешённые (active). */
 export const DEFAULT_ALLOWED_STATUSES: readonly string[] = ['active'];
 
-/** Чувствительность по умолчанию: restricted исключается, пока не выбрана явно. */
+/** Disclosure default: sensitive/restricted require explicit selection. */
 export const DEFAULT_ALLOWED_SENSITIVITY: readonly SensitivityLevel[] = [
   'public',
   'internal',
   'private',
-  'sensitive',
 ];
 
 const ALL_SENSITIVITY: readonly SensitivityLevel[] = [
@@ -68,7 +67,7 @@ export interface ContextQuery {
   projects: string[];
   people: string[];
   channels: string[];
-  /** Разрешённые уровни чувствительности; пустой массив = все, кроме restricted. */
+  /** Разрешённые уровни чувствительности; пустой массив = public/internal/private. */
   sensitivity: SensitivityLevel[];
   /** Разрешённые статусы; пустой массив = только active. */
   statuses: string[];

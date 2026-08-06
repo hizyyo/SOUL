@@ -27,6 +27,7 @@ interface HomeProps {
   rejectedCount: number;
   previewConfirmed: boolean;
   connectedClients: number;
+  busy: boolean;
 }
 
 export function Home({
@@ -46,6 +47,7 @@ export function Home({
   rejectedCount,
   previewConfirmed,
   connectedClients,
+  busy,
 }: HomeProps) {
   if (loading) {
     return (
@@ -68,6 +70,8 @@ export function Home({
             placeholder="Your display name"
             value={displayName}
             onChange={(e) => onDisplayNameChange(e.target.value)}
+            disabled={busy}
+            aria-label="Display name"
             style={{
               padding: '8px 12px',
               border: '1px solid #ccc',
@@ -75,7 +79,7 @@ export function Home({
               flex: '1 1 180px',
             }}
           />
-          <button onClick={onCreate} style={ctaBtnStyle}>
+          <button onClick={onCreate} disabled={busy} style={ctaBtnStyle}>
             Create SOUL
           </button>
         </div>
@@ -142,7 +146,7 @@ export function Home({
         </div>
         <button
           onClick={() => runAction(primary)}
-          disabled={primary.disabled}
+          disabled={primary.disabled || busy}
           style={{
             ...ctaBtnStyle,
             background: primary.disabled ? '#d1d5db' : soul.activated ? '#22c55e' : '#6366f1',
@@ -164,7 +168,7 @@ export function Home({
             <button
               key={a.id}
               onClick={() => runAction(a)}
-              disabled={a.disabled}
+              disabled={a.disabled || busy}
               title={a.note}
               style={{
                 display: 'flex',

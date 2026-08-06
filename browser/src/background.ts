@@ -10,7 +10,8 @@ import { HOST_NAME, HOST_TIMEOUT_MS } from './constants';
 import {
   errorResponse,
   isErrorResponse,
-  isTrustedSender,
+  isTrustedSenderForRequest,
+  validateNativeResponse,
   validateOutgoingRequest,
   type BridgeIncoming,
   type ErrorResponse,
@@ -19,7 +20,7 @@ import {
 
 interface PendingEntry {
   resolve(value: BridgeIncoming): void;
-  timer: number;
+  timer: ReturnType<typeof setTimeout>;
 }
 
 let port: ChromeNativePort | null = null;
@@ -53,15 +54,18 @@ function handleNativeMessage(message: unknown): void {
     return;
   }
   pending.delete(nonce);
-  window.clearTimeout(entry.timer);
-  entry.resolve(message as BridgeIncoming);
+  globalThis.clearTimeout(entry.timer);
+  const validated = validateNativeResponse(message, nonce);
+  entry.resolve(
+    validated ?? errorResponse('runtime_error', 'Native host вернул некорректный ответ.'),
+  );
 }
 
 function handleDisconnect(): void {
   port = null;
   for (const [nonce, entry] of pending) {
     pending.delete(nonce);
-    window.clearTimeout(entry.timer);
+    globalThis.clearTimeout(entry.timer);
     entry.resolve(errorResponse('runtime_error', 'Соединение с SOUL host-ом разорвано.'));
   }
 }
@@ -78,7 +82,7 @@ function sendToHost(request: OutgoingRequest): Promise<BridgeIncoming> {
       );
       return;
     }
-    const timer = window.setTimeout(() => {
+    const timer = globalThis.setTimeout(() => {
       pending.delete(request.nonce);
       resolve(errorResponse('runtime_error', 'Превышено время ожидания ответа host-а.'));
     }, HOST_TIMEOUT_MS);
@@ -87,23 +91,23 @@ function sendToHost(request: OutgoingRequest): Promise<BridgeIncoming> {
   });
 }
 
-async function handleRequest(message: unknown): Promise<BridgeIncoming> {
-  const validated = validateOutgoingRequest(message);
-  if (!validated.ok) {
-    return validated.error;
-  }
-  return sendToHost(validated.request);
-}
-
 chrome.runtime.onMessage.addListener(
   (message: unknown, sender: ChromeSender, sendResponse: (response: unknown) => void) => {
-    if (!isTrustedSender(sender)) {
+    const validated = validateOutgoingRequest(message);
+    if (!validated.ok) {
+      sendResponse(validated.error);
+      return false;
+    }
+    if (!isTrustedSenderForRequest(sender, validated.request)) {
       sendResponse(
-        errorResponse('invalid_sender', 'Сообщение отклонено: неизвестный отправитель.'),
+        errorResponse(
+          'invalid_sender',
+          'Сообщение отклонено: отправитель не соответствует origin запроса.',
+        ),
       );
       return false;
     }
-    void handleRequest(message).then(sendResponse);
+    void sendToHost(validated.request).then(sendResponse);
     return true;
   },
 );

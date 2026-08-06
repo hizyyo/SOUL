@@ -93,6 +93,7 @@ function Chip({
   return (
     <button
       onClick={onClick}
+      aria-pressed={active}
       style={{
         padding: '3px 10px',
         borderRadius: '12px',
@@ -209,7 +210,11 @@ export function ContextPage({ soul, entities }: { soul: SoulInfo | null; entitie
       )}
 
       <div style={{ display: 'flex', gap: '8px', marginBottom: '8px' }}>
+        <label htmlFor="context-search" className="sr-only">
+          Search local entities
+        </label>
         <input
+          id="context-search"
           value={search}
           onChange={(e) => setSearch(e.target.value)}
           placeholder="Full-text search (FTS5): try 'concise'"
@@ -285,7 +290,9 @@ export function ContextPage({ soul, entities }: { soul: SoulInfo | null; entitie
           </Chip>
         ))}
         {sensitivity.length === 0 && (
-          <span style={{ fontSize: '11px', color: '#9ca3af' }}>default: all except restricted</span>
+          <span style={{ fontSize: '11px', color: '#9ca3af' }}>
+            default: public, internal and private; sensitive levels require explicit selection
+          </span>
         )}
       </div>
 
@@ -306,8 +313,11 @@ export function ContextPage({ soul, entities }: { soul: SoulInfo | null; entitie
       </div>
 
       <div style={{ marginBottom: '12px', display: 'flex', alignItems: 'center', gap: '8px' }}>
-        <label style={{ fontSize: '12px', color: '#374151' }}>Token budget</label>
+        <label htmlFor="context-token-budget" style={{ fontSize: '12px', color: '#374151' }}>
+          Token budget
+        </label>
         <input
+          id="context-token-budget"
           type="range"
           min={100}
           max={CONTEXT_HARD_MAX_TOKENS}

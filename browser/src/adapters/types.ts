@@ -20,6 +20,9 @@ export interface PageElement {
   readonly tagName: string;
   readonly ariaLabel: string | null;
   readonly value: string;
+  readonly connected: boolean;
+  readonly editable: boolean;
+  readonly enabled: boolean;
   click(): void;
   focus(): void;
 }
@@ -53,6 +56,8 @@ export interface SiteAdapter {
   readonly mountSelector: string;
   /** Контейнер истории сообщений для сворачивания блока. */
   readonly historySelector: string;
+  /** Точный контейнер сообщения пользователя внутри истории. */
+  readonly userMessageSelector: string;
   readonly inputKind: 'textarea' | 'contenteditable';
 
   /** Проверка разметки страницы; ok — только если найдено всё необходимое. */

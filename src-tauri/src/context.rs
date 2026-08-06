@@ -14,6 +14,8 @@ use crate::db;
 pub const CONTEXT_POLICY_VERSION: &str = "soul-context-policy/1";
 pub const CONTEXT_STANDARD_TOKENS: u64 = 900;
 pub const CONTEXT_HARD_MAX_TOKENS: u64 = 3000;
+const MAX_CONTEXT_CONFLICTS: usize = 64;
+const MAX_CONTEXT_SUPERSEDED_IDS: usize = 256;
 
 /// Оценочная стоимость входа в модель (USD за 1 000 входных токенов).
 /// Нейтральный консервативный профиль: приложение не вызывает модель само
@@ -83,7 +85,7 @@ pub fn validate_query(query: &ContextQuery) -> Result<(), String> {
 }
 
 const DEFAULT_ALLOWED_STATUSES: [&str; 1] = ["active"];
-const DEFAULT_ALLOWED_SENSITIVITY: [&str; 4] = ["public", "internal", "private", "sensitive"];
+const DEFAULT_ALLOWED_SENSITIVITY: [&str; 3] = ["public", "internal", "private"];
 const ALL_SENSITIVITY: [&str; 5] = ["public", "internal", "private", "sensitive", "restricted"];
 
 /// Приоритет типов: границы всегда выше предпочтений и фактов.
@@ -118,7 +120,7 @@ pub struct ContextQuery {
     pub projects: Vec<String>,
     pub people: Vec<String>,
     pub channels: Vec<String>,
-    /// Разрешённые уровни чувствительности; пустой массив = все, кроме restricted.
+    /// Разрешённые уровни чувствительности; пустой массив = public/internal/private.
     pub sensitivity: Vec<String>,
     /// Разрешённые статусы; пустой массив = только active.
     pub statuses: Vec<String>,
@@ -305,6 +307,7 @@ struct ParsedEntity {
     confidence: f64,
     question_id: Option<String>,
     value_key: String,
+    relevance: i64,
 }
 
 impl ParsedEntity {
@@ -378,6 +381,7 @@ impl ParsedEntity {
             confidence,
             question_id,
             value_key,
+            relevance: 0,
         }
     }
 }
@@ -679,20 +683,11 @@ pub fn compile_context(entities: &[ContextEntity], query: &ContextQuery) -> Cont
         query_terms(&query_text)
     };
 
-    // Конфликты считаются по сырым данным: повторные ответы на один вопрос с
-    // другим значением дают пару (старое значение → новое) ещё до дедупликации.
-    // Парсим данные ровно один раз; дедупликация, конфликты и фильтры дальше
-    // используют эту подготовленную структуру, а не повторно deserializing JSON.
-    let parsed_entities: Vec<ParsedEntity> = entities.iter().map(ParsedEntity::from).collect();
-    let mut conflicts = detect_conflicts(&parsed_entities);
-    conflicts.sort_by(|x, y| format!("{}|{}", x.a, x.b).cmp(&format!("{}|{}", y.a, y.b)));
-
-    let dedup = dedupe_superseded(&parsed_entities);
-    let mut superseded_ids = dedup.superseded_ids;
-    superseded_ids.sort();
-
-    let mut items: Vec<ContextItem> = Vec::new();
-    for parsed in dedup.kept {
+    // Фильтры применяются до дедупликации и построения метаданных. Иначе
+    // conflict/superseded могли раскрыть ID чувствительных или нерелевантных
+    // сущностей, которые сам запрос не имеет права видеть.
+    let mut filtered_entities = Vec::new();
+    for mut parsed in entities.iter().map(ParsedEntity::from) {
         if !allowed_statuses.contains(&parsed.status) {
             continue;
         }
@@ -714,13 +709,48 @@ pub fn compile_context(entities: &[ContextEntity], query: &ContextQuery) -> Cont
         if !in_time_window(&parsed.created_at, &query.since, &query.until) {
             continue;
         }
-        // Релевантность вычисляется один раз на сущность: и для фильтра, и
-        // для итогового элемента (раньше — дважды, с перетокенизацией запроса).
-        let relevance = relevance_of_terms(parsed, &terms);
-        if !query_text.is_empty() && relevance <= 0 {
+        parsed.relevance = relevance_of_terms(&parsed, &terms);
+        if !query_text.is_empty() && parsed.relevance <= 0 {
             continue;
         }
-        items.push(to_context_item(parsed, relevance));
+        filtered_entities.push(parsed);
+    }
+
+    let mut conflicts = detect_conflicts(&filtered_entities);
+    conflicts.sort_by(|x, y| format!("{}|{}", x.a, x.b).cmp(&format!("{}|{}", y.a, y.b)));
+    conflicts.truncate(MAX_CONTEXT_CONFLICTS);
+
+    let dedup = dedupe_superseded(&filtered_entities);
+    let mut superseded_ids = dedup.superseded_ids;
+    superseded_ids.sort();
+    superseded_ids.truncate(MAX_CONTEXT_SUPERSEDED_IDS);
+
+    // Метаданные также входят в токен-бюджет. Убираем низкоприоритетный хвост
+    // до тех пор, пока даже пустой pack с этим отчётом помещается в бюджет.
+    loop {
+        let draft =
+            serialize_pack_body_parts("", &conflicts, &superseded_ids, "00000000", 0, max_tokens);
+        let estimate = estimate_tokens(&draft);
+        let serialized = draft.replacen(
+            "tokens: X of",
+            &format!("tokens: {} of", format_tokens(estimate)),
+            1,
+        );
+        if estimate_tokens(&serialized) <= max_tokens {
+            break;
+        }
+        if superseded_ids.pop().is_some() {
+            continue;
+        }
+        if conflicts.pop().is_some() {
+            continue;
+        }
+        break;
+    }
+
+    let mut items: Vec<ContextItem> = Vec::new();
+    for parsed in dedup.kept {
+        items.push(to_context_item(parsed, parsed.relevance));
     }
     items.sort_by(compare_items);
 
@@ -933,9 +963,9 @@ pub fn compile_context_cached(
         return Ok(pack);
     }
 
-    let souls = db::list_souls(conn).map_err(|e| format!("Cannot read SOUL database: {e}"))?;
-    let entities: Vec<ContextEntity> = match souls.first() {
-        Some(soul) => db::list_entities(conn, &soul.soul_id)
+    let active_soul_id = db::active_soul_id(conn)?;
+    let entities: Vec<ContextEntity> = match active_soul_id {
+        Some(soul_id) => db::list_entities(conn, &soul_id)
             .map_err(|e| format!("Cannot read SOUL database: {e}"))?
             .into_iter()
             .map(|r| ContextEntity {
@@ -1174,7 +1204,15 @@ mod tests {
     }
 
     #[test]
-    fn restricted_sensitivity_excluded_by_default_and_included_when_asked() {
+    fn sensitive_and_restricted_are_excluded_by_default_and_included_when_asked() {
+        let sensitive = entity(
+            "ent_sensitive",
+            "fact",
+            "active",
+            &calibration_data("text_sensitive", "y", "sensitive", 0.9),
+            "2026-01-01T00:00:00Z",
+            "2026-01-01T00:00:00Z",
+        );
         let restricted = entity(
             "ent_a",
             "fact",
@@ -1184,10 +1222,19 @@ mod tests {
             "2026-01-01T00:00:00Z",
         );
         let pack = compile_context(
-            std::slice::from_ref(&restricted),
+            &[sensitive.clone(), restricted.clone()],
             &query(ContextQuery::default()),
         );
         assert!(pack.items.is_empty());
+
+        let pack = compile_context(
+            &[sensitive],
+            &query(ContextQuery {
+                sensitivity: vec!["sensitive".to_string()],
+                ..ContextQuery::default()
+            }),
+        );
+        assert_eq!(pack.items.len(), 1);
 
         let pack = compile_context(
             &[restricted],
@@ -1445,6 +1492,65 @@ mod tests {
     }
 
     #[test]
+    fn conflict_and_superseded_metadata_respects_query_filters() {
+        let visible = entity(
+            "ent_visible",
+            "preference",
+            "active",
+            &calibration_data("pref_private", "visible", "internal", 0.9),
+            "2026-01-01T00:00:00Z",
+            "2026-01-01T00:00:00Z",
+        );
+        let filtered = entity(
+            "ent_sensitive",
+            "preference",
+            "active",
+            &calibration_data("pref_private", "secret", "sensitive", 0.9),
+            "2026-01-01T00:00:00Z",
+            "2026-02-01T00:00:00Z",
+        );
+
+        let pack = compile_context(&[visible, filtered], &query(ContextQuery::default()));
+        assert_eq!(pack.items.len(), 1);
+        assert_eq!(pack.items[0].id, "ent_visible");
+        assert!(pack.conflicts.is_empty());
+        assert!(pack.superseded_ids.is_empty());
+        assert!(!pack.serialized.contains("ent_sensitive"));
+    }
+
+    #[test]
+    fn conflict_and_superseded_metadata_is_capped_and_budgeted() {
+        let mut entities = Vec::new();
+        for question in 0..400 {
+            for answer in ["a", "b"] {
+                entities.push(entity(
+                    &format!("ent_{question:03}_{answer}"),
+                    "preference",
+                    "active",
+                    &calibration_data(&format!("pref_{question:03}"), answer, "internal", 0.9),
+                    "2026-01-01T00:00:00Z",
+                    if answer == "a" {
+                        "2026-01-01T00:00:00Z"
+                    } else {
+                        "2026-02-01T00:00:00Z"
+                    },
+                ));
+            }
+        }
+
+        let pack = compile_context(
+            &entities,
+            &query(ContextQuery {
+                max_tokens: Some(120.0),
+                ..ContextQuery::default()
+            }),
+        );
+        assert!(pack.conflicts.len() <= MAX_CONTEXT_CONFLICTS);
+        assert!(pack.superseded_ids.len() <= MAX_CONTEXT_SUPERSEDED_IDS);
+        assert!(pack.token_estimate <= pack.max_tokens);
+    }
+
+    #[test]
     fn cost_estimate_is_conservative_and_stable() {
         assert_eq!(cost_estimate_usd(0), 0.0);
         assert_eq!(cost_estimate_usd(1000), 0.005);
@@ -1517,6 +1623,46 @@ mod tests {
             "cache must invalidate on state mutation"
         );
         assert!(third.serialized.contains("bullet points"));
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn cached_context_uses_explicit_active_soul() {
+        let dir =
+            std::env::temp_dir().join(format!("soul-active-context-test-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let conn = crate::db::init_db(&dir).unwrap();
+        let first = crate::db::create_soul(&conn, "Первый", "device_c").unwrap();
+        let second = crate::db::create_soul(&conn, "Второй", "device_c").unwrap();
+        crate::db::add_entity(
+            &conn,
+            &first.soul_id,
+            "preference",
+            "active",
+            r#"{"claim":"First profile only","sensitivity":"internal"}"#,
+            "device_c",
+        )
+        .unwrap();
+        crate::db::add_entity(
+            &conn,
+            &second.soul_id,
+            "preference",
+            "active",
+            r#"{"claim":"Second profile only","sensitivity":"internal"}"#,
+            "device_c",
+        )
+        .unwrap();
+
+        crate::db::set_active_soul(&conn, &first.soul_id).unwrap();
+        let first_pack = compile_context_cached(&conn, &ContextQuery::default()).unwrap();
+        assert!(first_pack.serialized.contains("First profile only"));
+        assert!(!first_pack.serialized.contains("Second profile only"));
+
+        crate::db::set_active_soul(&conn, &second.soul_id).unwrap();
+        let second_pack = compile_context_cached(&conn, &ContextQuery::default()).unwrap();
+        assert!(second_pack.serialized.contains("Second profile only"));
+        assert!(!second_pack.serialized.contains("First profile only"));
 
         let _ = std::fs::remove_dir_all(&dir);
     }

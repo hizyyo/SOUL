@@ -43,6 +43,8 @@ src-tauri/target/
 src-tauri/icons/android/
 src-tauri/icons/ios/
 src-tauri/gen/
+src-tauri/binaries/
+artifacts/
 
 # Logs
 *.log

@@ -1202,11 +1202,17 @@ pub fn execute_capability(
     let tx = conn
         .unchecked_transaction()
         .map_err(|e| format!("execute transaction failed: {e}"))?;
-    tx.execute(
-        "UPDATE capabilities SET used_at = ?1 WHERE id = ?2",
-        params![Utc::now().to_rfc3339(), cap.id],
-    )
-    .map_err(|e| format!("capability update failed: {e}"))?;
+    let claimed = tx
+        .execute(
+            "UPDATE capabilities SET used_at = ?1 WHERE id = ?2 AND used_at IS NULL",
+            params![Utc::now().to_rfc3339(), cap.id],
+        )
+        .map_err(|e| format!("capability update failed: {e}"))?;
+    if claimed != 1 {
+        tx.rollback()
+            .map_err(|e| format!("capability claim rollback failed: {e}"))?;
+        return refuse(conn, keys, &cap, &action, "capability already used");
+    }
     let receipt = update_receipt_to_simulated(&tx, keys, &cap, &action, &simulation)?;
     tx.commit()
         .map_err(|e| format!("execute commit failed: {e}"))?;

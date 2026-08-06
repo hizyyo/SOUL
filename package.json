@@ -2,6 +2,7 @@
   "name": "soul",
   "private": true,
   "version": "0.1.0",
+  "packageManager": "pnpm@11.12.0",
   "type": "module",
   "description": "SOUL — Personal Intelligence Runtime",
   "scripts": {
@@ -9,6 +10,9 @@
     "dev:web": "vite",
     "build": "tsc && vite build",
     "build:companion": "node browser/build.mjs",
+    "build:sidecars": "node scripts/prepare-sidecars.mjs --target x86_64-pc-windows-msvc",
+    "build:sidecars:debug": "node scripts/prepare-sidecars.mjs --debug --target x86_64-pc-windows-msvc",
+    "package:companion": "node scripts/package-companion.mjs",
     "preview": "vite preview",
     "test": "vitest run",
     "test:watch": "vitest",
@@ -17,7 +21,7 @@
     "lint:fix": "eslint src/ browser/src/ --fix",
     "format": "prettier --check src/",
     "format:write": "prettier --write src/",
-    "release:check": "powershell -NoProfile -ExecutionPolicy Bypass -File scripts/release-check.ps1",
+    "release:check": "powershell -NoProfile -ExecutionPolicy Bypass -File scripts/release-check.ps1 -Target x86_64-pc-windows-msvc",
     "tauri": "tauri"
   },
   "dependencies": {

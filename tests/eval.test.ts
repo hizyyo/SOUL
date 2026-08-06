@@ -1,4 +1,4 @@
-import { describe, it, expect } from 'vitest';
+import { describe, it, expect, vi } from 'vitest';
 import {
   SCENARIO_BANK,
   scenarioById,
@@ -15,6 +15,8 @@ import {
   shareCardText,
   EVAL_RECOMMENDED_ROUNDS,
   SHARE_MIN_ROUNDS,
+  B1_PROFILE_STORAGE_KEY,
+  clearPersistedBaselineProfile,
   type EvaluationRecord,
 } from '../src/data/eval';
 import type { ContextEntity } from '../src/data/context';
@@ -74,7 +76,7 @@ describe('SCENARIO_BANK', () => {
 });
 
 describe('buildBaselineProfile', () => {
-  it('пропускает restricted, ставит границы выше предпочтений, режет по лимиту', () => {
+  it('пропускает sensitive/restricted, ставит границы выше предпочтений, режет по лимиту', () => {
     const boundary = entity({
       id: 'b1',
       entity_type: 'boundary',
@@ -85,16 +87,27 @@ describe('buildBaselineProfile', () => {
       data: '{"claim":"Secret health detail","sensitivity":"restricted"}',
     });
     const pref = entity({ id: 'p1' });
+    const sensitive = entity({
+      id: 's1',
+      data: '{"claim":"Private medical detail","sensitivity":"sensitive"}',
+    });
     const candidate = entity({
       id: 'c1',
       status: 'candidate',
     });
-    const text = buildBaselineProfile([pref, restricted, candidate, boundary], 15, 1400);
+    const text = buildBaselineProfile([pref, restricted, sensitive, candidate, boundary], 15, 1400);
     const lines = text.split('\n');
     expect(lines[0]).toContain('Boundary: Never send money');
     expect(text).not.toContain('Secret health detail');
+    expect(text).not.toContain('Private medical detail');
     expect(text).toContain('Prefers: Prefer concise');
     expect(lines.length).toBeLessThanOrEqual(3);
+  });
+
+  it('clears the legacy localStorage B1 profile', () => {
+    const removeItem = vi.fn();
+    clearPersistedBaselineProfile({ removeItem });
+    expect(removeItem).toHaveBeenCalledWith(B1_PROFILE_STORAGE_KEY);
   });
 
   it('пустой вход даёт пустой профиль', () => {
@@ -245,6 +258,8 @@ describe('share-карта', () => {
     expect(card).toContain('SOUL wins: 14');
     expect(card).toContain('Baseline wins: 6');
     expect(card).toContain('Win rate: 70.0%');
+    expect(card).not.toContain('Model:');
+    expect(card).not.toContain('same for both variants');
     expect(card).not.toContain('private dilemma');
     expect(card).not.toContain('soul answer');
   });

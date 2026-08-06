@@ -18,7 +18,7 @@ const port = {
 };
 
 beforeAll(async () => {
-  (globalThis as { window?: unknown }).window = globalThis;
+  delete (globalThis as { window?: unknown }).window;
   (globalThis as { chrome?: unknown }).chrome = {
     runtime: {
       id: EXTENSION_ID,
@@ -42,6 +42,16 @@ const validPing = {
   nonce: 'n'.repeat(20),
 };
 
+const validContextRequest = {
+  type: 'soul.get_context',
+  protocol: PROTOCOL_VERSION,
+  extensionId: EXTENSION_ID,
+  nonce: 'c'.repeat(20),
+  origin: 'https://chatgpt.com',
+  task: 'question',
+  maxTokens: 900,
+};
+
 describe('isTrustedSender', () => {
   it('доверяет только собственному id расширения', () => {
     expect(isTrustedSender({ id: EXTENSION_ID })).toBe(true);
@@ -53,6 +63,10 @@ describe('isTrustedSender', () => {
 });
 
 describe('background onMessage sender validation', () => {
+  it('loads as an MV3 service worker without a window global', () => {
+    expect('window' in globalThis).toBe(false);
+    expect(listeners).toHaveLength(1);
+  });
   it('отклоняет сообщение от другого расширения', () => {
     const respond = vi.fn();
     connectNative.mockClear();
@@ -91,5 +105,15 @@ describe('background onMessage sender validation', () => {
     expect(port.postMessage).toHaveBeenCalledOnce();
     const sent = port.postMessage.mock.calls[0]?.[0] as { type: string };
     expect(sent.type).toBe('soul.ping');
+  });
+
+  it('отклоняет context request с origin, не совпадающим с sender URL', () => {
+    const respond = vi.fn();
+    connectNative.mockClear();
+    for (const fn of listeners) {
+      fn(validContextRequest, { id: EXTENSION_ID, url: 'https://claude.ai/chat/1' }, respond);
+    }
+    expect((respond.mock.calls[0]?.[0] as { code: string }).code).toBe('invalid_sender');
+    expect(connectNative).not.toHaveBeenCalled();
   });
 });

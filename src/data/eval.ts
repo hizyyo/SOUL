@@ -21,8 +21,12 @@ import {
 /** Рекомендуемое число раундов для индивидуального демо (§6.7). */
 export const EVAL_RECOMMENDED_ROUNDS = 20;
 
-/** Ключ localStorage с редактируемым базовым профилем B1. */
+/** Legacy key: B1 is no longer persisted because it can contain personal data. */
 export const B1_PROFILE_STORAGE_KEY = 'soul.b1.profile';
+
+export function clearPersistedBaselineProfile(storage: Pick<Storage, 'removeItem'>): void {
+  storage.removeItem(B1_PROFILE_STORAGE_KEY);
+}
 
 /** Доля выборки для share-карты — не публиковать без min(N). */
 export const SHARE_MIN_ROUNDS = 20;
@@ -211,7 +215,7 @@ export function randomScenario(): BlindScenario {
 /**
  * B1: короткий вручную проверяемый профиль (§6.3). Детерминированно собирается
  * из активных сущностей: границы и решения выше предпочтений и фактов;
- * restricted исключается; evidence не включается. Пользователь может
+ * sensitive и restricted исключаются; evidence не включается. Пользователь может
  * отредактировать результат — в этом случае используется его текст.
  */
 export function buildBaselineProfile(
@@ -251,15 +255,17 @@ export function buildBaselineProfile(
         data = {};
       }
       const sensitivity = data.sensitivity;
-      const restricted = typeof sensitivity === 'string' && sensitivity === 'restricted';
+      const sensitive =
+        typeof sensitivity === 'string' &&
+        (sensitivity === 'sensitive' || sensitivity === 'restricted');
       const claim = typeof data.claim === 'string' ? data.claim.trim() : '';
       const confidence =
         typeof data.confidence === 'number' && Number.isFinite(data.confidence)
           ? data.confidence
           : 0;
-      return { e, claim, restricted, confidence, tier: TIER[e.entity_type] ?? 0 };
+      return { e, claim, sensitive, confidence, tier: TIER[e.entity_type] ?? 0 };
     })
-    .filter((x) => !x.restricted && x.claim.length > 0)
+    .filter((x) => !x.sensitive && x.claim.length > 0)
     .sort(
       (a, b) =>
         b.tier - a.tier ||
@@ -491,8 +497,8 @@ export function wilson95(wins: number, total: number): [number, number] {
 }
 
 /**
- * Share-карта (§6.6): только при N >= SHARE_MIN_ROUNDS; без личных вопросов
- * и ответов — только агрегаты, метаданные и честная оговорка.
+ * Share-карта (§6.6): только при N >= SHARE_MIN_ROUNDS; без личных вопросов,
+ * ответов и непроверяемых утверждений о модели — только агрегаты.
  */
 export function shareCardText(stats: EvalStats, name: string): string | null {
   if (stats.completed < SHARE_MIN_ROUNDS) return null;
@@ -509,7 +515,6 @@ export function shareCardText(stats: EvalStats, name: string): string | null {
     ci ? `95% CI: ${stats.confidenceLabel}` : '95% CI: —',
     `Exact binomial p: ${stats.pValueLabel}`,
     '',
-    `Model: same for both variants`,
     `SOUL: ${name}`,
   ];
   return lines.join('\n');
