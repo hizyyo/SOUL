@@ -1,4 +1,4 @@
-# SESSION-01: Core Data Model & Local SQLite Storage
+# Core Data Model and Local Storage
 
 **Дата:** 2026-07-31
 

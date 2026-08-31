@@ -197,7 +197,7 @@ export function Policies() {
     <div>
       <h2 style={{ marginTop: 0 }}>Policies</h2>
       <p style={{ fontSize: '13px', color: '#555', marginTop: 0 }}>
-        Детерминированный DSL политик (ULTRA_MVP §4.10): только типизированные условия, эффекты{' '}
+        Детерминированный DSL политик: только типизированные условия, эффекты{' '}
         {EFFECTS.join(', ')}. Без eval, без сети, без регулярных выражений.
       </p>
 

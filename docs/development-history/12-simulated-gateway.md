@@ -1,4 +1,4 @@
-# SESSION-12 — Имитированный Gateway
+# Simulated Gateway
 
 ## Цель
 
@@ -55,7 +55,7 @@
 - `src/pages/PolicyBadges.tsx` — новый (общий `EffectBadge`).
 - `src/pages/Policies.tsx` — вынесен `EffectBadge`, добавлена секция `<GatewaySection />`.
 - `tests/gateway.test.ts` — новый (12 тестов).
-- `docs/session-log/SESSION-12.md` — этот файл.
+- `docs/development-history/12-simulated-gateway.md` — этот файл.
 
 ## Изменённые контракты
 
@@ -133,7 +133,7 @@
 - `src/data/gateway.ts` — `GatewayCapability` (канал, `decision_effect`, `confirmed_by_user`, `redacted`, подпись, `signature_valid`), `GatewayReceipt` (подпись, `signature_valid`), `GatewayChannel` (snake_case), `validateChannelInput`, `capabilityState` → `held`, лимиты реестра.
 - `src/pages/GatewaySection.tsx` — подтверждение held-capability кнопкой «Подтвердить (пользователь)», живой реестр (список/добавить/удалить), селект канала из реестра, бейджи подписи «✓ подписано / ✕ подпись недействительна».
 - `tests/gateway.test.ts` — +5 тестов (проверка канала, held-состояние, лимиты реестра).
-- `docs/session-log/SESSION-12.md` — этот раздел.
+- `docs/development-history/12-simulated-gateway.md` — этот раздел.
 
 ### Тесты (review-pass)
 

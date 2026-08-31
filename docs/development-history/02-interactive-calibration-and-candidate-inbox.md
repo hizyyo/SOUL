@@ -1,4 +1,4 @@
-# SESSION-02: Interactive Calibration & Candidate Inbox
+# Interactive Calibration and Candidate Inbox
 
 **Date:** 2026-07-31
 

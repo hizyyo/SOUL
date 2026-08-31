@@ -1,4 +1,4 @@
-# SESSION-10 — Blind Preference Test (20 раундов)
+# Blind Preference Evaluation
 
 ## Цель
 
@@ -52,7 +52,7 @@
 - `src/App.tsx` — пропсы `soul`/`entities` в Tests.
 - `tests/eval.test.ts` — новый (18 тестов).
 - `README.md` — статусы пунктов P0.
-- `docs/session-log/SESSION-10.md` — этот файл.
+- `docs/development-history/10-blind-preference-evaluation.md` — этот файл.
 
 ## Изменённые контракты
 

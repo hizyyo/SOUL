@@ -1,4 +1,4 @@
-# SESSION-08 — Локальный MCP-сервер и интеграции с AI-клиентами
+# Local MCP Runtime and Client Integrations
 
 ## Цель
 

@@ -1,4 +1,4 @@
-# SESSION-09 — Browser Companion для веб-чатов
+# Browser Companion Integration
 
 ## Цель
 

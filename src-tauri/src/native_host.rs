@@ -1,4 +1,4 @@
-//! Регистрация Native Messaging host в браузерах Chromium (SESSION-09).
+//! Регистрация Native Messaging host в браузерах Chromium.
 //!
 //! Регистрация двухуровневая:
 //! 1. манифест host-а `<app_dir>/native-messaging/com.soul.browser_companion.json`

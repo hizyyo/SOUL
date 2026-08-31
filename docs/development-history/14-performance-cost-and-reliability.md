@@ -1,4 +1,4 @@
-# SESSION-14 — Производительность, токены и надёжность
+# Performance, Cost, and Reliability
 
 ## Цель
 

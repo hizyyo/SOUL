@@ -389,7 +389,7 @@ describe('determinism and stability', () => {
     // нагрузка машины) не роняют тест, но систематическое превышение ловится.
     // Бюджет 200 мс — smoke-порог для dev-машины: эта копия компилятора
     // используется только для превью в UI, продакшен-путь — Rust с кешем,
-    // его p95 (< 75 мс) измеряется в release (см. SESSION-14.md).
+    // его p95 (< 75 мс) измеряется release-тестами.
     const sorted = [...samples].sort((a, b) => a - b);
     const p95 = sorted[Math.floor(iterations * 0.95)];
     expect(p95).toBeLessThan(200);

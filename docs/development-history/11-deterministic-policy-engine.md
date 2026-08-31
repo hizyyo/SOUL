@@ -1,4 +1,4 @@
-# SESSION-11 — Детерминированный DSL политик
+# Deterministic Policy Engine
 
 ## Цель
 
@@ -54,7 +54,7 @@
 - `src/components/Nav.tsx` — вкладка Policies.
 - `src/App.tsx` — рендер `<Policies />`.
 - `tests/policy.test.ts` — новый (15 тестов).
-- `docs/session-log/SESSION-11.md` — этот файл.
+- `docs/development-history/11-deterministic-policy-engine.md` — этот файл.
 
 ## Изменённые контракты
 

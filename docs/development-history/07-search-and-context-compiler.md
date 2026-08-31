@@ -1,4 +1,4 @@
-# SESSION-07 — Полнотекстовый поиск и компилятор контекста
+# Search and Context Compiler
 
 ## Цель
 

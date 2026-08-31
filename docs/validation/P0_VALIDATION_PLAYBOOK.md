@@ -58,7 +58,7 @@
 
 ## Blind Preference Test
 
-Следовать §4.9-4.10 `SOUL_ULTRA_MVP_CONTEXT.md` и §6.2-6.9 `SOUL_MASTER_PLAN.md`:
+Следовать разделам Evaluation и Product Boundaries в `../product/p0-product-specification.md`, а также модели валидации из `../product/product-strategy-and-architecture.md`:
 
 - одна и та же модель, версия, температура, инструменты, задача и бюджет токенов;
 - A: скомпилированный SOUL context; B: вручную проверенный B1 профиль;

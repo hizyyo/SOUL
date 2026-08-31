@@ -6,7 +6,7 @@ import {
 } from './context';
 
 /**
- * Blind Preference Test (SESSION-10) — чистая модель данных и статистики.
+ * Blind Preference Test — чистая модель данных и статистики.
  *
  * Протокол (SOUL_MASTER_PLAN §6.2): один и тот же сценарий генерируется
  * пользователем в его AI-клиенте дважды — вариант с SOUL-контекстом и вариант
@@ -291,7 +291,7 @@ export function buildBaselineProfile(
 const ANSWER_RULES =
   'Answer in 2-4 sentences. Plain text, no preamble, no markdown headers, no bullet lists.';
 
-/** Промпт варианта SOUL: контекст компилируется компилятором SESSION-07. */
+/** Промпт варианта SOUL: контекст создаётся детерминированным компилятором. */
 export function soulPromptFor(input: {
   scenario: BlindScenario;
   name: string;

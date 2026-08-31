@@ -1,4 +1,4 @@
-# SESSION-17 - Release hardening
+# Windows Release Hardening
 
 ## Статус
 

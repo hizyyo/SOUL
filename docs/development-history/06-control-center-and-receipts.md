@@ -1,4 +1,4 @@
-# SESSION-06 — Control center и проверка сущностей
+# Control Center and Receipts
 
 ## Цель
 

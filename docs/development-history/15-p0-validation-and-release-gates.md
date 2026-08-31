@@ -1,4 +1,4 @@
-# P0-валидация и release pipeline
+# P0 Validation and Release Gates
 
 ## Сделано
 

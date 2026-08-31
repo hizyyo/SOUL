@@ -3,7 +3,7 @@ import { domainForQuestion, parseEntityData, type SensitivityLevel } from './rev
 export type { SensitivityLevel };
 
 /**
- * Детерминированный компилятор контекста SESSION-07.
+ * Детерминированный компилятор контекста.
  *
  * Чистые синхронные функции: без сети, без модели, без часов и случайности —
  * одинаковое состояние SOUL + одинаковый запрос всегда дают одинаковый пак.
@@ -111,7 +111,7 @@ export interface ContextPack {
   serialized: string;
 }
 
-/** Оценочная стоимость входных токенов, USD (SESSION-14). */
+/** Оценочная стоимость входных токенов, USD. */
 export const COST_USD_PER_1K_INPUT_TOKENS = 0.005;
 
 export function costEstimateUsd(tokenEstimate: number): number {

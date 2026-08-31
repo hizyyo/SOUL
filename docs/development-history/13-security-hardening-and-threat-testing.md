@@ -1,4 +1,4 @@
-# SESSION-13 — Усиление безопасности и набор угроз
+# Security Hardening and Threat Testing
 
 ## Цель
 

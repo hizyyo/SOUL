@@ -1,4 +1,4 @@
-//! Native Messaging host для Browser Companion (SESSION-09).
+//! Native Messaging host для Browser Companion.
 //!
 //! Собственный узкий протокол `soul-bridge/1` поверх Chrome Native Messaging
 //! (кадры u32-LE длина + JSON). Расширение SOUL подключается через

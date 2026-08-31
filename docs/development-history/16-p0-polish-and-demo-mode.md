@@ -1,4 +1,4 @@
-# SESSION-16 - Полировка P0 и демонстрационный режим
+# P0 Polish and Demo Mode
 
 ## Цель
 

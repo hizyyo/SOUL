@@ -1,4 +1,4 @@
-# SESSION-00
+# Repository Bootstrap
 
 **Дата:** 2026-07-30
 

@@ -76,7 +76,7 @@ pub struct CalibrationState {
 }
 
 /// Результат полнотекстового поиска: найденные сущности и признак, что
-/// результат обрезан лимитом (SESSION-14 — UI показывает «и ещё N»).
+/// результат обрезан лимитом, чтобы UI мог показать «и ещё N».
 #[derive(Debug, Serialize, Deserialize)]
 pub struct SearchResult {
     items: Vec<EntityInfo>,
