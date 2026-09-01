@@ -1,5 +1,5 @@
 <div align="center">
-  <img src="docs/assets/soul-mark.svg" alt="SOUL" width="128" height="128" />
+  <img src="docs/assets/soul-logo.jpg" alt="SOUL" width="160" />
   <h1>SOUL</h1>
   <p><strong>A local-first identity and policy runtime for AI tools.</strong></p>
   <p>SOUL keeps a portable, inspectable model of your preferences, decisions, goals, and boundaries on your device, then compiles only the context required for each task.</p>
