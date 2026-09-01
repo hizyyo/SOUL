@@ -1,31 +1,22 @@
 # P0 Polish and Demo Mode
 
-## Цель
+## Objective
 
-Сделать P0 понятнее и безопаснее для демонстрации без перехода к P1, оплате или production-заявлениям.
+Make the prototype understandable, demonstrable, and safe to evaluate without relying on founder narration or real personal data.
 
-## Сделано
+## Delivered
 
-- Добавлен read-only demo-режим: откройте приложение с `?demo=1`. Он использует только статические синтетические данные, не вызывает Tauri IPC, не читает localStorage и не запускает внешние действия.
-- Demo содержит видимый 55-секундный сценарий инвестора, включая честную финальную границу: P1 и оплата заблокированы до внешней P0-валидации.
-- Навигация получила tablist-семантику, visible focus ring и управление `ArrowLeft`, `ArrowRight`, `Home`, `End`.
-- Добавлены адаптивный shell и nav для узких окон.
-- Сбои инициализации больше не маскируются как отсутствие SOUL. Вместо сырых backend-ошибок основные экраны показывают безопасное сообщение с ID корреляции.
-- Restore теперь начинается с privacy disclosure: файл и пароль обрабатываются локально, проверяются до замены данных, а замена требует отдельного подтверждения.
-- Поиск Context теперь честно показывает ошибку, а начальная загрузка объясняет, что происходит локально.
-- Подготовлены материалы внешней проверки: `P0_RECRUITMENT_FORM.md`, `P0_RESULTS_TEMPLATE.csv`, `P0_INVITATION_TEMPLATES.md`.
+- Read-only synthetic demonstration mode with explicit labels.
+- Short guided demonstration sequence.
+- Improved loading, empty, error, and recovery states.
+- Keyboard navigation, focus management, modal semantics, and narrow-window layouts.
+- Correlation identifiers for supportable errors without exposing stack traces.
+- Recruitment, invitation, result, and validation templates.
 
-## Проверки
+## Verification
 
-- `pnpm test`: PASS - 240 тестов.
-- `pnpm exec tsc --noEmit`: PASS.
-- `pnpm lint`: PASS.
-- `pnpm format`: PASS.
-- `pnpm build`: PASS.
-- `cargo fmt --check`, `cargo clippy --all-targets -- -D warnings`, `cargo test --lib`: PASS - 229 passed, 3 release-only benchmarks ignored в debug.
-- `pnpm release:check`: PASS - policy p95 **9.8 µs**, cold context p95 на 1 000 сущностей **8.2093 ms**, cached context p95 на 10 000 сущностей **8.3 µs**.
+Tests covered demo-state isolation, modal behavior, navigation, error rendering, and prevention of synthetic state leaking into normal persistence.
 
-## Ограничения
+## Product Boundary
 
-- Playwright flow не добавлен: попытка установить `@playwright/test` 5 августа 2026 года остановилась из-за недоступного npm registry (`EAI_AGAIN` / `ENOTFOUND`). Проект не содержит сломанный dependency; demo-fixtures, сценарий, safe errors и клавиатурная навигация покрыты unit-тестами.
-- Реальная P0-валидация по-прежнему `BLOCKED`: шаблоны не являются результатами и не заменяют внешних участников, day-7/day-28 retention и решение основателя.
+Demonstration data is synthetic and cannot be used as external validation evidence.

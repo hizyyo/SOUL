@@ -4,6 +4,11 @@
   <p><strong>A local-first identity and policy runtime for AI tools.</strong></p>
   <p>SOUL keeps a portable, inspectable model of your preferences, decisions, goals, and boundaries on your device, then compiles only the context required for each task.</p>
   <p>
+    <a href="https://github.com/hizyyo/SOUL/actions/workflows/quality.yml"><img src="https://github.com/hizyyo/SOUL/actions/workflows/quality.yml/badge.svg?branch=master" alt="Quality" /></a>
+    <img src="https://img.shields.io/badge/version-0.2.0--alpha.1-8B5CF6?style=flat-square" alt="Version 0.2.0-alpha.1" />
+    <img src="https://img.shields.io/badge/status-pre--release-F59E0B?style=flat-square" alt="Pre-release status" />
+  </p>
+  <p>
     <img src="https://img.shields.io/badge/Tauri_2-24C8DB?style=flat-square&logo=tauri&logoColor=white" alt="Tauri 2" />
     <img src="https://img.shields.io/badge/Rust-000000?style=flat-square&logo=rust&logoColor=white" alt="Rust" />
     <img src="https://img.shields.io/badge/React_19-20232A?style=flat-square&logo=react&logoColor=61DAFB" alt="React 19" />
@@ -19,7 +24,7 @@
 </div>
 
 > [!IMPORTANT]
-> SOUL is an early-stage research prototype. The desktop runtime, local data layer, context compiler, policy engine, MCP integration, and Browser Companion are implemented. The current Gateway demonstrates policy-controlled execution locally; it does not yet control arbitrary external services.
+> SOUL `0.2.0-alpha.1` is an active-development pre-release build, not a published product release. The desktop runtime, local data layer, context compiler, policy engine, MCP integration, and Browser Companion are implemented. The current Gateway demonstrates policy-controlled execution locally; it does not yet control arbitrary external services.
 
 ## Why SOUL
 
@@ -164,10 +169,12 @@ The current security boundary is intentionally narrow: policy enforcement is bin
 - [Production readiness](docs/operations/production-readiness.md)
 - [Validation program](docs/validation/P0_VALIDATION_PLAYBOOK.md)
 - [Development history](docs/development-history/README.md)
+- [Changelog](CHANGELOG.md)
+- [Draft release notes](docs/releases/0.2.0-alpha.1.md)
 
 ## Project Status
 
-SOUL is under active development and is not currently offered as a production release. External validation, release signing, secure updates, legal review, and additional platform verification remain open gates.
+SOUL is under active development. Version `0.2.0-alpha.1` identifies the current pre-release build; no Git tag or GitHub Release has been published. External validation, release signing, secure updates, legal review, and additional platform verification remain open gates.
 
 ## License
 

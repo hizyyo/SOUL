@@ -20,9 +20,9 @@ run(process.execPath, [resolve(root, 'browser', 'build.mjs')]);
 const manifestPath = resolve(extensionDir, 'manifest.json');
 const manifest = JSON.parse(readFileSync(manifestPath, 'utf8'));
 const packageVersion = JSON.parse(readFileSync(resolve(root, 'package.json'), 'utf8')).version;
-if (manifest.version !== packageVersion) {
+if (manifest.version_name !== packageVersion) {
   throw new Error(
-    `Browser manifest version ${manifest.version} does not match package version ${packageVersion}.`,
+    `Browser manifest version name ${manifest.version_name} does not match package version ${packageVersion}.`,
   );
 }
 
@@ -36,7 +36,7 @@ if (readdirSync(extensionDir, { recursive: true }).some((entry) => `${entry}`.en
 
 rmSync(outputDir, { recursive: true, force: true });
 mkdirSync(outputDir, { recursive: true });
-const archiveName = `SOUL-Browser-Companion-v${manifest.version}.zip`;
+const archiveName = `SOUL-Browser-Companion-v${packageVersion}.zip`;
 const archivePath = resolve(outputDir, archiveName);
 rmSync(archivePath, { force: true });
 

@@ -4,6 +4,8 @@ import { EXTENSION_ID, SUPPORTED_ORIGINS } from '../browser/src/constants';
 
 interface Manifest {
   manifest_version: number;
+  version?: string;
+  version_name?: string;
   key?: string;
   permissions?: string[];
   host_permissions?: string[];
@@ -19,7 +21,9 @@ const manifest = manifestJson as Manifest;
 
 async function extensionIdFromKey(keyB64: string): Promise<string> {
   const der = new Uint8Array(
-    atob(keyB64).split('').map((c) => c.charCodeAt(0)),
+    atob(keyB64)
+      .split('')
+      .map((c) => c.charCodeAt(0)),
   );
   const digest = new Uint8Array(await crypto.subtle.digest('SHA-256', der));
   const nibbles = [...digest.subarray(0, 16)].flatMap((byte) => [byte >> 4, byte & 0x0f]);
@@ -29,6 +33,11 @@ async function extensionIdFromKey(keyB64: string): Promise<string> {
 describe('manifest.source.json', () => {
   it('manifest_version 3', () => {
     expect(manifest.manifest_version).toBe(3);
+  });
+
+  it('uses a store-compatible version and the current pre-release name', () => {
+    expect(manifest.version).toBe('0.2.0.1');
+    expect(manifest.version_name).toBe('0.2.0-alpha.1');
   });
 
   it('ID расширения, вычисленный из ключа, совпадает с константой', async () => {

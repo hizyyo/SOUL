@@ -1,76 +1,21 @@
 # Control Center and Receipts
 
-## Цель
+## Objective
 
-Дать пользователю понятный контрольный центр состояния SOUL, проверки сущностей и выбора одного следующего действия — без общего окна общения.
+Turn the desktop shell into a state-aware control center with one clear next action.
 
-## Реализовано
+## Delivered
 
-- **Контрольный центр (Home)**: переработан в единый центр состояния. Сводка: статус (Setup/Active), подтверждённые сущности, кандидаты, отклонённые, подключённые AI-клиенты (0), прогресс калибровки. Блок «NEXT STEP» с одним визуально доминирующим CTA и блок «OTHER ACTIONS» с вторичными действиями. Поле запроса и список диалогов не добавлялись.
-- **Чистая модель состояний `src/data/control.ts`**: `buildControlCenter` — детерминированная функция без сети, модели и случайности. Состояния: `no-soul`, `start-calibration`, `continue-calibration`, `review-activate`, `active`. Пять обязательных состояний-действий:
-  - продолжить калибровку (CTA, ведёт в калибровку с честным шагом «step N of M»);
-  - активировать SOUL (CTA, ведёт в Preview; при подтверждённом preview надпись «Activate SOUL»);
-  - подключить AI-инструмент (CTA в состоянии Active, заблокирован — «coming in a later update»);
-  - проверить disclosure receipt (вторичное действие, ведёт в Settings);
-  - улучшить SOUL (вторичное действие, заблокировано — later).
-- **Просмотр квитанций**: Rust `list_local_receipts` (сканирует `receipts/*.json`, повреждённые файлы и не-JSON пропускаются, сортировка свежие первыми) + команда `list_receipts_cmd` + секция «Local receipts» в Settings (список: когда, сколько сущностей/событий удалено, удалены ли ключи, имя файла; пустое состояние «No receipts yet»). Квитанции не содержат личного содержимого — только счётчики и время.
-- **Клавиатура**: в модале явного подтверждения (Inbox) — Escape закрывает, автфокус на чекбокс согласия. Узкая ширина поддерживается flex-wrap во всех карточках.
-- **Проверка кандидатов** (готово ранее, вошло в приёмку): сортировка по важности и риску (`rankCandidates`), карточка с типом/уверенностью/датой источника/доказательством/областью, Подтвердить/Изменить/Отклонить/Отменить, явное подтверждение чувствительных и границ, маскировка доказательств, запрет `rejected → active` на Rust, отклонённые не проходят массовую активацию, все переходы пишут события (`entity.updated/activated/rejected`, `candidate.reopened`).
+- Home-state model covering creation, calibration, review, activation, and integration readiness.
+- Single primary call to action derived from current local state.
+- Secondary actions for candidate review, profile improvement, and receipt inspection.
+- Local receipt viewer with bounded parsing and corruption tolerance.
+- Responsive states and explicit loading and failure feedback.
 
-## Изменённые файлы
+## Verification
 
-- `src/data/control.ts`: новый — модель состояний и CTA контрольного центра.
-- `src/pages/Home.tsx`: переработан в контрольный центр (сводка, один CTA, вторичные действия).
-- `src/pages/Settings.tsx`: секция «Local receipts» (список квитанций через `list_receipts_cmd`).
-- `src/pages/Inbox.tsx`: Escape + автфокус в модале явного подтверждения.
-- `src/App.tsx`: новые пропсы Home (rejectedCount, previewConfirmed, onGoToSettings).
-- `src-tauri/src/package.rs`: `ReceiptSummary`, `list_local_receipts` (+3 теста).
-- `src-tauri/src/lib.rs`: команда `list_receipts_cmd` (зарегистрирована).
-- `tests/control.test.ts`: новый — 10 тестов модели состояний.
+Tests covered state transitions, active-profile behavior, receipt size limits, malformed receipt files, inaccessible actions, and safe rendering.
 
-## Как работает
+## Follow-up
 
-После запуска Home показывает контрольный центр. CTA ровно один и всегда соответствует состоянию: создать SOUL → начать калибровку → продолжить калибровку → просмотреть и активировать → (после активации) подключить AI-инструмент. Вторичные действия: проверить кандидатов (только если есть), проверить квитанции, улучшить SOUL. Квитанции удаления видны в Settings в секции «Local receipts»; Disclosure-квитанции появятся с интеграцией AI-клиентов (SESSION-08+), интерфейс уже готов.
-
-## Тесты и проверки
-
-- `cargo test`: PASS — 53/53 (+3: пустой каталог квитанций; список после wipe с пропуском повреждённого файла и не-JSON; сортировка по дате).
-- `cargo clippy --all-targets`: без предупреждений.
-- `pnpm test`: PASS — 69/69 (+10 контрольного центра: каждое состояние, один CTA, честный шаг калибровки, Review & Activate → Activate SOUL после подтверждения, кандидаты только при наличии, квитанции всегда доступны, XSS-безопасная поверхность лейблов).
-- `pnpm typecheck`, `pnpm lint`, `pnpm build`: PASS. Prettier: PASS (все изменённые файлы).
-
-## Проверка безопасности
-
-- **Угрозы**: подмена состояния/CTA, инъекция HTML в лейблы, показ личного содержимого в квитанциях, повреждённые квитанции, скрытая реактивация отклонённых, массовое подтверждение жёстких границ.
-- **Меры**: модель состояний — чистая функция, тестируется детерминированно (тест XSS-поверхности лейблов); квитанции содержат только счётчики и время (без личного содержимого); повреждённые файлы квитанций пропускаются без паники; `rejected → active` запрещён на Rust и отклонённые отсекаются массовой активацией (SESSION-05); границы требуют индивидуального подтверждения; весь текст рендерится React-ом как текст (экран XSS-строк уже покрыт тестами SESSION-04).
-
-## Производительность и токены
-
-- `buildControlCenter` — O(1) вычислений, ноль токенов и сети; `list_local_receipts` — один проход по каталогу квитанций (несколько файлов).
-- Никаких новых запросов к БД и LLM на пути контрольного центра.
-
-## Известные ограничения
-
-- Кнопка «Connect an AI client» и «Improve SOUL» заблокированы до соответствующих сессий (08+, 09+).
-- Список квитанций не обновляется автоматически при возврате на Settings (обновляется при монтировании вкладки — переключение табов перемонтирует страницу).
-- Disclosure-квитанции (раскрытие контекста при подключённом AI) появятся в SESSION-08+; сейчас показываются только квитанции удаления.
-
-## Повторная проверка и исправленные баги (review-pass)
-
-По результатам аудита сессии (полный прогон проверок + ручной код-ревью по правилам universal/typescript/rust) исправлено:
-
-- **Баг (визуальный): кнопка «Create SOUL» потеряла цвета.** При выносе общих стилей в `ctaBtnStyle` из него упали `background`/`color`/`cursor`, а кнопка создания их не переопределяла — стала системной серой. Вернул базовые значения в `ctaBtnStyle`.
-- **UX-пробел: активированный SOUL с незавершённой калибровкой (достижимо через импорт пакета с `activated=true`) не имел пути «продолжить калибровку».** Добавлено вторичное действие `continue-calibration` для `activated && !calibrationDone` (+2 теста).
-- **DoS-защита: `list_local_receipts` читал файлы квитанций без лимита размера.** Файлы > 1 МБ пропускаются (тест `list_receipts_skips_oversized_files` — валидная квитанция с паддингом 1.1 МБ не попадает в список).
-- **Floating promise** в `Settings.loadReceipts` — явный `void`.
-
-Проверки после фиксов: `cargo test` 54/54, clippy чисто, `pnpm test` 71/71, typecheck/lint/prettier/build — PASS.
-
-## Последующие сессии
-
-- По плану: SESSION-07 — поиск и компилятор контекста (FTS, фильтры области/чувствительности/состояния/времени, границы выше предпочтений).
-
-## Коммит
-
-- `923c95f` — `feat(soul): control center with single next-step CTA and local receipt viewer [session-06]`
-- `5bca735` — `fix(soul): review-pass fixes - create CTA styling, calibration path for active soul, receipt size guard [session-06]`
+Context-disclosure receipts were added with [Local MCP Runtime and Client Integrations](08-local-mcp-runtime-and-client-integrations.md).

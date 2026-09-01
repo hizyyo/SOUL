@@ -2,7 +2,7 @@
 
 This directory preserves implementation records for the major milestones that produced the current SOUL prototype.
 
-The records are archival. They may reference earlier terminology, file paths, test counts, and commit messages that were accurate at the time but are not normative product documentation. For current behavior, use the root README, product specification, tests, and operational documentation.
+The records are archival milestone summaries, not normative product documentation. For current behavior, use the root README, product specification, tests, and operational documentation.
 
 ## Milestones
 
@@ -27,4 +27,4 @@ The records are archival. They may reference earlier terminology, file paths, te
 | [16](16-p0-polish-and-demo-mode.md)                     | P0 polish and demo mode                   |
 | [17](17-windows-release-hardening.md)                   | Windows release hardening                 |
 
-Historical Git commit messages retain their original session identifiers to preserve repository integrity. The descriptive milestone names above are the public documentation labels.
+Git history remains authoritative for commit metadata. These records use descriptive milestone names and omit obsolete internal workflow identifiers.

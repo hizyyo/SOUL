@@ -1,126 +1,22 @@
 # Blind Preference Evaluation
 
-## Цель
+## Objective
 
-Дать пользователю честное измеримое доказательство персональности SOUL (§6 мастера): не «модель лучше», а «ответ с SOUL-контекстом пользователь предпочитает ответу с коротким базовым профилем (B1)». Реализован ручной режим генерации: приложение не зовёт модели (0 токенов), пользователь генерирует оба варианта в своём AI-клиенте из готовых промптов, вставляет ответы, приложение перемешивает порядок (слот назначает host), фиксирует выбор ДО раскрытия и считает статистику (win rate на не-тайных, точный двусторонний биномиальный тест, Wilson 95% CI). 20 раундов — минимум для индивидуального демо (§6.7); share-карта публикует только агрегаты без личных вопросов и ответов.
+Measure whether SOUL-assisted responses are preferred over a reviewed baseline without revealing assignment before selection.
 
-## Реализовано
+## Delivered
 
-### Rust: хранилище раундов `src-tauri/src/eval.rs` (новый)
+- Twenty-round local blind evaluation flow.
+- Host-assigned randomized response slots.
+- Reviewed baseline profile and task-specific SOUL context variants.
+- Choice options for response A, response B, or neither.
+- Assignment reveal only after the choice is persisted.
+- Aggregate statistics and live refresh after mutation.
 
-- Таблица `evaluations`: `id (evl_<uuid>)`, `soul_id` (FK → souls), `scenario_id`, `scenario_text`, `domain`, **`soul_variant` ('a'|'b')**, `soul_answer`, `baseline_answer`, `baseline_profile`, `context_pack`, `context_entity_ids` (JSON-массив), `user_choice` (NULL | 'a'|'b'|'neither'), `completed_at`, `created_at`; индекс по `soul_id`. Создаётся из `init_db` (CREATE TABLE IF NOT EXISTS, как остальные таблицы).
-- **Слот назначает host**: `create_evaluation` вызывает `pick_slot(rand::thread_rng())` — фронтенд не знает слот до выбора, раскрытие считается от сохранённого слота (`submit_choice` возвращает строку с `soul_variant`; статистика в TS-модели оттуда же). Раунд завершается один раз: повторный `submit_choice` — ошибка «already completed»; выбор валидируется (`a`|`b`|`neither`).
-- Валидация до записи: существование души, непустые `scenario_id`/`scenario_text`/оба ответа, лимиты `MAX_VARIANT_ANSWER_CHARS = 20 000`, `MAX_SCENARIO_CHARS = 4 000`, `MAX_BASELINE_PROFILE_CHARS = 4 000`, `MAX_CONTEXT_PACK_CHARS = 60 000`, `MAX_CONTEXT_ENTITY_IDS = 1 000`.
-- Команды: `create_evaluation_cmd`, `submit_evaluation_choice_cmd`, `list_evaluations_cmd` (свежие первыми), `delete_evaluation_cmd`.
-- **9 тестов**: хранение раунда и валидность слота, отказ на отсутствующую душу, отказ на пустые/oversized ответы и пак, детерминизм слота на сидированных RNG (8 сидов — оба слота встречаются; тот же сид — тот же слот), запись выбора и раскрытие по слоту, финальность выбора, невалидный выбор, неизвестный раунд, фильтр по душе и порядок, delete + повторный delete.
+## Verification
 
-### TypeScript: модель `src/data/eval.ts` (новый)
+Tests covered assignment secrecy, randomization, persistence, deletion cascades, aggregate calculations, baseline isolation, and style-normalized prompt construction.
 
-- **Банк 24 held-out дилемм** (`SCENARIO_BANK`): 8 областей (career, work, money, communication, product, leadership, personal, ethics), по 3 сценария; id уникальны, вопросы — свежие дилеммы, не из прошлых разговоров (§6.4). `scenarioById`, `scenarioDomains`, `randomScenario` (для UI).
-- **B1-профиль** (§6.3): `buildBaselineProfile(entities, maxLines=15, maxChars=1400)` — детерминированный короткий профиль из активных сущностей: restricted исключён, границы > решения > цели > предпочтения > факты, evidence не включается; пользователь может отредактировать (localStorage `soul.b1.profile`, кнопка «Reset from SOUL»).
-- **Промпты вариантов**: `soulPromptFor` (вопрос + сериализованный пак компилятора SESSION-07 + «ответь как <name>») и `baselinePromptFor` (вопрос + только короткий профиль); оба заканчиваются одинаковой строкой правил ответа (2–4 предложения, без преамбул) — нормализация стиля/длины (§6.2.6). `compileScenarioPack` — пак с `text = текст сценария`, бюджет 900.
-- **Статистика** (§6.5/6.6): `computeEvalStats` — wins (выбор == слот), losses, ties (neither), win rate на не-тайных, `exactBinomialTwoSided` (p0 = 0.5, точный двусторонний по меньшей стороне), `wilson95` (z = 1.95996), лейблы для UI. Контрольный вектор: 35/44 → 79.5%, CI 65.5%–88.8% (совпадает с примером мастера).
-- **Раскрытие**: `displayVariants` (A/B из сохранённого слота), `revealFor` (выбор против слота, `matchedSoul`, `soulLabel`).
-- **Share-карта** (§6.6): `shareCardText` — только при ≥ 20 завершённых раундах (`SHARE_MIN_ROUNDS`), только агрегаты + p + CI, без вопросов/ответов; вставляется строка «Model: same for both variants».
+## Product Boundary
 
-### UI: страница Tests (`src/pages/Tests.tsx`, переписана)
-
-- Панель статистики всегда видна: прогресс `X / 20`, win rate, wins/losses/neither, CI 95%, p.
-- Редактор B1-профиля с авто-сидом и сбросом.
-- Мастер раунда: **pick** (сценарии по областям, пометка «(used)», Random scenario) → **prompts** (оба промпта с кнопками Copy, метаданные пака: N сущностей, ~токены; предупреждение, если пак пуст) → **answers** (два textarea, Submit) → **choice** (A/B в перемешанном порядке + Neither, без раскрытия) → **reveal** («You picked your SOUL / the baseline / Neither»). Кнопка Next round, Random scenario.
-- История завершённых раундов (сценарий, выбор, результат, Delete).
-- Share-карта с Copy (появляется от 20 раундов).
-- Блокировка до активации SOUL; мягкое предупреждение при < 3 активных сущностей.
-- `App.tsx`: `<Tests soul={soul} entities={entities} />`.
-
-### TypeScript-тесты `tests/eval.test.ts` (18)
-
-- Банк: ≥ 20 сценариев, уникальные id, непустые вопросы; scenarioById/domains.
-- B1: restricted и candidate исключены, границы выше предпочтений, лимиты строк и символов, пустой вход.
-- Промпты: SOUL-промпт содержит пак и вопрос, базовый — профиль и НЕ содержит пак, правила ответа одинаковы.
-- Статистика: Wilson 35/44 → 65.5%–88.8%; бином 14/20 → 2·60460/2²⁰; 10/10 → 1/512; симметрия (9,44) = (35,44); пример мастера 48 раундов (35/9/4); незавершённые не считаются.
-- Слепой выбор: displayVariants по слоту, revealFor для победы/поражения/neither.
-- Share-карта: < 20 → null; ≥ 20 — агрегаты без личного содержимого.
-
-## Изменённые файлы
-
-- `src-tauri/src/eval.rs` — новый (таблица, слот, CRUD, валидация, 9 тестов).
-- `src-tauri/src/db.rs` — `init_db` вызывает `eval::init_evaluations`.
-- `src-tauri/src/lib.rs` — `mod eval;` + 4 команды.
-- `src/data/eval.ts` — новый (банк, B1, промпты, статистика, share-карта).
-- `src/pages/Tests.tsx` — переписан (была заглушка «Coming in SESSION-03»).
-- `src/App.tsx` — пропсы `soul`/`entities` в Tests.
-- `tests/eval.test.ts` — новый (18 тестов).
-- `README.md` — статусы пунктов P0.
-- `docs/development-history/10-blind-preference-evaluation.md` — этот файл.
-
-## Изменённые контракты
-
-- Новый контракт: **blind-test/1** — таблица `evaluations`; слот SOUL-варианта назначается host-ом случайно и сохраняется до выбора; `submit_choice` финализирует раунд (повтор невозможен); статистика считается только по завершённым раундам.
-- Локальный протокол UI (не сетевой): `create_evaluation_cmd(soul_id, scenario_id, scenario_text, domain, soul_answer, baseline_answer, baseline_profile, context_pack, context_entity_ids)` → `EvaluationRow`; `submit_evaluation_choice_cmd(evaluation_id, choice)` → `EvaluationRow`; `list_evaluations_cmd(soul_id)`; `delete_evaluation_cmd(evaluation_id)`.
-- Схема SQLite: + таблица `evaluations` (CREATE TABLE IF NOT EXISTS, миграций не требуется).
-
-## Запущенные тесты
-
-- `cargo test --lib`: **PASS** — 140 passed (включая 9 новых eval + регресс-тест wipe).
-- `cargo clippy --all-targets`: **PASS** — без предупреждений.
-- `cargo fmt --check`: **PASS** — репозиторий приведён к rustfmt (был грязный с SESSION-03, отдельный style-коммит).
-- `pnpm test`: **PASS** — 194 passed (включая 18 новых eval).
-- `pnpm typecheck`: **PASS**.
-- `pnpm lint`: **PASS**.
-- `pnpm format`: **PASS**.
-- `pnpm build`: **PASS**.
-
-## Проверка безопасности
-
-- **Слепой протокол не подделывается постфактум**: слот SOUL-варианта назначается случайно в Rust при создании раунда и хранится в БД; выбор пользователя фиксируется до раскрытия; повторная подача выбора невозможна (раунд финализируется). Раскрытие и статистика считаются от сохранённого слота, а не от порядка вставки ответов.
-- **Никакого содержимого наружу**: раунды хранятся только локально в `soul.db`; share-карта содержит только агрегаты (wins/losses/ties, win rate, CI, p) — без вопросов, ответов, профиля и паков; публикация блокируется до 20 завершённых раундов.
-- **Защита размера**: лимиты на ответы (20 КБ), сценарий (4 КБ), профиль (4 КБ), пак (60 КБ), число id сущностей (1000) — исключают раздувание локальной БД из IPC.
-- **B1 не утекает в SOUL-промпт**: `baselinePromptFor` не содержит пак; `soulPromptFor` не содержит профиль.
-- **Экспорт/импорт/удаление души**: `wipe_local_data` (delete_soul_cmd, SESSION-03) дополнительно удаляет `evaluations` — раунды удаляются вместе с душой (исправлено в review-pass, см. ниже; регресс-тест `wipe_all_clears_evaluations_with_soul`).
-
-## Влияние на производительность и токены
-
-- Генерация ответов — ручная, вне приложения: 0 токенов и 0 сетевых вызовов.
-- `compileScenarioPack` — детерминированный компилятор SESSION-07, ~мс на банк сценариев.
-- Статистика — O(N) над завершёнными раундами; биномиальные коэффициенты — O(min(wins, losses)) с накоплением, без факториалов.
-
-## Известные ограничения
-
-- Банк сценариев фиксирован (24 дилеммы на дату сессии); «(used)»-пометка поощряет свежие сценарии, но повторные раунды не запрещены.
-- Пустой пак (нет сущностей, релевантных сценарию) делает раунд фактически «двумя базовыми» — UI предупреждает; это честный B3-подобный случай, а не ошибка протокола.
-- Пользователь — сам себе оператор: он знает, в какой textarea вставил SOUL-ответ; слепота относится к позиции A/B, которую контролирует host.
-- Контекст B1 по умолчанию собирается из тех же сущностей, что и SOUL-пак (это задумано: B1 — сильный простой бейзлайн, §6.3); редактируется пользователем.
-
-## Коммит
-
-- `9a4b7e4` `feat(soul): blind preference test with host-assigned slots and B1 baseline [session-10]`
-- `ddb6baa` `docs(soul): record session-10 commit hash in session log [session-10]`
-
-## Review-pass
-
-Проверка коммита `9a4b7e4` (правила code-reviewer: universal + rust + typescript).
-
-### Найденные и исправленные проблемы
-
-1. **Orphan-раунды при удалении души** (высокая): `wipe_all` (db.rs) удалял только `entities/events/soul_state/souls`; `evaluations.soul_id` — FK без `ON DELETE CASCADE`, поэтому после `delete_soul_cmd` раунды оставались в БД навсегда (каталог receipts не затрагивается — удаление вообще ничего не удаляло из `evaluations`). Исправлено: `DELETE FROM evaluations` добавлен в `wipe_all`; регресс-тест `wipe_all_clears_evaluations_with_soul` (eval.rs).
-2. **Статистика и история не обновлялись после раунда** (средняя): созданный раунд не добавлялся в `records`, а `handleChoice` только мапил существующие записи — панель «Rounds: N/20», win rate и история были stale до перезагрузки приложения или Delete. Исправлено в Tests.tsx: `handleSubmitAnswers` добавляет созданный раунд в `records`, `handleChoice` обновляет позицию в списке.
-3. **Mojibake в UI-текстах Tests.tsx** (низкая): эм-дэш `—`, `·`, `←`/`→` были записаны двойной перекодировкой UTF-8 (`â€”`, `Â·`, `â†`+U+0090 и т.п.) — текст отображался кракозябрами. Исправлены байты на правильные символы.
-
-### Проверено и признано чистым
-
-- SQL — только параметризованные запросы (`params!`), никакой интерполяции.
-- Нет `unsafe`, нет `unwrap()` в продакшн-коде (тестовые `.unwrap()` в `#[cfg(test)]`), clippy чистый.
-- Слепота протокола: слот назначается в Rust (`thread_rng`), выбор финализируется (`user_choice` NOT NULL после submit), повторная подача невозможна; раскрытие/статистика считаются от сохранённого слота.
-- Статистика: точный двусторонний бином для p0 = 0.5 корректен (симметрия распределения), Wilson без continuity correction по формуле §6.6, контрольный вектор 35/44 → 65.5%–88.8% воспроизводится.
-- Share-карта содержит только агрегаты; localStorage B1-профиль не попадает ни в SOUL-промпт, ни в share.
-- Rust: `chars().count()` для лимитов (не байты), JSON-колонки читаются через `unwrap_or_default` (грациозно), нет гонок: `AppState.conn` под `Mutex`, Tauri-команды сериализуются.
-
-### Прочее
-
-- `cargo fmt` по всему репозиторию (файлы со времён SESSION-03 не проходили rustfmt) — отдельный style-коммит, без изменения поведения; `cargo fmt --check` теперь чистый.
-
-## Коммиты review-pass
-
-- `11c78d0` `style(soul): apply rustfmt repo-wide [session-10]`
-- `01a9cc7` `fix(soul): review-pass session-10 — wipe cascades to evaluations, live stats refresh, mojibake cleanup [session-10]`
+The evaluation measures response preference. It does not prove that SOUL predicts a user's future real-world decisions.

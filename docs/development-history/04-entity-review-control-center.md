@@ -1,102 +1,22 @@
 # Entity Review Control Center
 
-**Дата:** 2026-07-31
+## Objective
 
-## Цель
+Give users a clear interface for inspecting and correcting the information SOUL may use.
 
-Дать пользователю контрольный центр: просмотр и ранжирование кандидатов, подтверждение/отклонение/редактирование с возможностью отмены (undo), явное подтверждение для границ (boundaries) и чувствительных данных, маскировка потенциально чувствительного содержимого в интерфейсе, один доминирующий призыв к действию на главном экране.
+## Delivered
 
-## Реализовано
+- Ranked candidate and active-entity views.
+- Atomic confirmation, editing, rejection, and deletion operations.
+- Evidence masking for sensitive source fragments.
+- Search, filters, confidence indicators, and lifecycle status.
+- Undo-safe mutation handling and visible error states.
+- Cyrillic-aware masking and text-safe rendering.
 
-- **Rust `update_entity`**: валидация переходов состояний (fail-closed): `candidate → candidate|active|rejected`, `active|rejected → candidate`, прямое `rejected → active` запрещено. Изменение данных допустимо только при редактировании кандидата (`candidate → candidate`). Валидация JSON: объект, `claim ≤ 2000` символов, неизменённые данные отклоняются (`Entity data is unchanged.`).
-- **События**: общий `append_event` (структура `NewEvent` вместо 8 аргументов — clippy), цепочка `previous_event_hash` для всех операций; новые операции: `entity.updated`, `entity.activated`, `entity.rejected`, `candidate.reopened`.
-- **Исправлен баг** `read_soul_head`: `row.get(0)` без типа давал `InvalidColumnType(Null)` — исправлено через `row.get::<_, Option<String>>(0)` (было 25 падающих тестов).
-- **Контракт IPC**: `update_entity_cmd` — `data` стал `Option<String>` (`None` = только смена статуса).
-- **`src/data/review.ts`**: `buildEntityData` (уверенность по типу: binary 0.9, multiple 0.85, text 0.7, writing 0.6; явность 1/0.9/0.8/0.7; чувствительность; область по префиксу вопроса), `maskText` (email, api-ключи, Bearer-токены, числа ≥16 цифр, телефоны, секреты `password|api_key|secret|Пароль`, токены ≥24 символов), `detectSensitivity` (sensitive/private/internal), `computeActivationScore`, `rankCandidates` (тир 2: границы/риск, тир 1: sensitive/restricted, затем score, затем свежесть), `parseEntityData`, `claimOf`, `formatSourceDate`.
-- **Inbox**: ранжированный список, карточки с типом/уверенностью/датой источника/областью/доказательством, редактирование claim, явный модал для границ/чувствительных с чекбоксом подтверждения, секции Rejected (Restore) и Active, undo-бар после подтверждения/отклонения.
-- **Home**: один доминирующий CTA по состоянию (Start Calibration → Continue (step X of N) → Activate SOUL → Connect an AI client, disabled), статистика (подтверждённые, кандидаты, подключённые клиенты).
-- **Калибровка**: `onComplete` передаёт ответы наверх (устранён баг resume — родитель хранит answers), сущности создаются через `buildEntityData`, `answerToEntity` удалён.
-- **Тесты**: 25 новых (Vitest) для review.ts; 12 новых (Rust) для update_entity/событий.
-- **Формат**: все изменённые файлы прогнаны через `prettier --write`.
+## Verification
 
-## Изменённые файлы
+Automated coverage included ownership checks, invalid transitions, duplicate updates, recovery after failed writes, no-op guards, score validation, and hostile display strings.
 
-- `src-tauri/src/db.rs`: `update_entity`, `append_event` + `NewEvent`, `get_entity`, `read_soul_head` (фикс), 12 тестов.
-- `src-tauri/src/lib.rs`: `update_entity_cmd` — `data: Option<String>`.
-- `src/data/review.ts`: новый — вспомогательные функции проверки/ранжирования/маскировки.
-- `src/data/calibration.ts`: удалён `answerToEntity`, форматирование.
-- `src/pages/Calibration.tsx`: `onComplete(answers)`.
-- `src/pages/Home.tsx`: переписан — CTA-состояния и статистика.
-- `src/pages/Inbox.tsx`: переписан — ранжирование, редактирование, модал, undo.
-- `src/App.tsx`: поток калибровки → сущности, undo, edit, resume.
-- `tests/review.test.ts`: новый — 25 тестов.
+## Outcome
 
-## Изменённые контракты
-
-- `update_entity_cmd`: параметр `data` стал опциональным (`Option<String>`); `null` означает «только статус».
-- Новые операции событий: `entity.updated`, `entity.activated`, `entity.rejected`, `candidate.reopened`.
-- Миграций БД нет.
-
-## Запущенные тесты
-
-- `cargo test`: PASS — 27/27 (12 новых: неверный переход, данные только для кандидата, неизменённые данные, невалидный JSON, неизвестный статус, событийная цепочка, reopen).
-- `cargo clippy --all-targets`: PASS, без предупреждений (8 аргументов `append_event` вынесены в `NewEvent`).
-- `pnpm typecheck`: PASS.
-- `pnpm lint`: PASS.
-- `pnpm test`: PASS — 37/37 (12 существующих + 25 новых).
-- `npx prettier --check` по изменённым файлам: PASS.
-
-## Проверка безопасности
-
-- **Угрозы**: недопустимые переходы состояний, инъекция произвольного JSON, утечка секретов в UI/логи, случайное подтверждение границ, маскируемые данные в интерфейсе.
-- **Меры**: переходы валидируются на Rust (fail-closed), JSON валидируется (объект, лимит claim), данные не логируются, маскировка на UI (email, ключи, токены, длинные числа), границы/чувствительные требуют явного подтверждения с чекбоксом (кнопка disabled до подтверждения).
-- **Ограничение (честно)**: маскировка — UI-уровень, данные в БД хранятся в открытом виде (запланировано на поздние сессии); undo работает только для последнего действия; дата в маске дат не чувствительна.
-
-## Влияние на производительность и токены
-
-- Путь проверки детерминированный, LLM не вызывается: 0 токенов.
-- Валидация и ранжирование — O(n) по сущностям, мгновенно на реальных объёмах.
-- Отдельные инвоки на каждое действие (без пакетных операций) — приемлемо для локального приложения.
-
-## Известные ограничения
-
-- Прямой переход `rejected → active` запрещён (только через candidate) — осознанное fail-closed решение.
-- Undo доступен только для последнего действия; после обновления страницы история не сохраняется.
-- Нет пакетного подтверждения всех кандидатов.
-- Prettier: `pnpm format` по-прежнему падает на `src/components/Nav.tsx` и `src/pages/Settings.tsx` (предсуществующая проблема репозитория, файлы не менялись в этой сессии — чистый реформат откачен).
-- UI-строки на английском (следующая сессия может локализовать).
-
-## Последующие сессии
-
-- По плану: интеграция с клиентами AI (первый «канал» взаимодействия).
-
-## Коммит
-
-- `b432eda` — `feat(soul): entity review control center [session-04]`
-- `fda5836` — `fix(soul): review fixes - atomic entity updates, error handling, cyrillic masking [session-04]`
-- `cb18fc5` — `fix(soul): full quality pass - validation everywhere, crash recovery, no-op guard, score NaN guard [session-04]`
-
-## Повторная проверка и исправленные баги
-
-- **App.tsx**: undo-бар (`lastReview`) показывался даже при неудачном обновлении статуса — отменой «отменялось» несостоявшееся действие и записывался лишний `entity.updated`. `runStatusUpdate` теперь возвращает `boolean`, `lastReview` ставится только при успехе.
-- **App.tsx**: `handleCalibrationComplete` без try/catch — при сбое `add_entity_cmd` (например, claim > 2000) создание сущностей прерывалось, ошибка не показывалась (unhandled rejection), частичные сущности оставались. Теперь: ошибки собираются по каждой сущности, создание продолжается, показывается баннер, переход в Inbox гарантирован.
-- **App.tsx**: `handleSaveCalibration` — ошибки сохранения прогресса теперь попадают в баннер ошибок.
-- **Calibration.tsx**: сайд-эффект `onComplete(answers)` в теле render (`if (!currentStep)`) — при StrictMode создал бы сущности дважды. Убран (guard без побочного эффекта; завершение — только через `handleNext`).
-- **Calibration.tsx**: `setSaving(false)` не выполнялся при ошибке `onSave` — кнопка навсегда в состоянии «Saving...». Обёрнуто в `try/finally`.
-- **db.rs**: `update_entity` не был атомарным — UPDATE статуса и запись события выполнялись раздельно; при сбое записи события статус уже поменялся, но цепочка событий не обновилась (рассинхрон при экспорте/восстановлении). Обёрнуто в транзакцию (`unchecked_transaction` + `commit`).
-- **review.ts**: `maskEmail` не маскировал кириллические адреса (`почта@яндекс.рф`) — `\b` в V8 считает кириллицу не-word символом. Заменено на lookbehind/lookahead с `\p{L}`. Аналогично обновлён `detectSensitivity`.
-- **review.ts**: `maskLongNumbers` не маскировал 16-значные номера с разделителями (`4111 1111 1111 1111`). Теперь считается количество цифр в последовательности с разделителями.
-- Даты и ISO-датавремя не маскируются (проверено тестами, включая `2026-07-31T21:04:08Z`).
-- Повторный прогон: `cargo test` 27/27, `cargo clippy` чистый, `pnpm test` 41/41 (+4 новых), typecheck/lint/prettier PASS, `pnpm build` PASS.
-
-## Второй проход полной проверки (качество)
-
-- **db.rs**: `add_entity` теперь валидирует статус и JSON данных (fail-closed, как `update_entity`) — ранее принимал любые значения; добавлено 2 теста.
-- **db.rs**: `create_soul` и `add_entity` обёрнуты в транзакции — инвариант «сущность/событие/head_hash атомарны» теперь держится на всём слое БД, а не только в `update_entity`.
-- **db.rs**: no-op `candidate → candidate` без данных теперь отклоняется (`Entity is already a candidate; provide new data to edit it.`) — закрыт путь записи «пустого» события `entity.updated` (например, при двойном клике на Restore). +1 тест (цепочка событий не растёт).
-- **review.ts**: `computeActivationScore` — клампинг `explicitness` в [0,1] и fallback-штраф для неизвестной `sensitivity` из legacy-данных — исключён NaN-скоринг (ломавший сортировку ранжирования). +2 теста.
-- **App.tsx**: восстановление потерянных сущностей — если `calibration_step >= TOTAL_STEPS`, сущностей нет и сохранённые ответы есть (окно сбоя между сохранением калибровки и созданием сущностей), при загрузке сущности пересоздаются из сохранённых ответов. Общий helper `createEntitiesFromAnswers` для калибровки и восстановления.
-- **App.tsx**: редактирование legacy-сущности с массивом в `data` больше не теряет claim — парсинг только объектных данных.
-- **Inbox.tsx**: кнопки Undo (undo-бар), Restore и Confirm (модал) отключаются на время выполнения — исключены повторные вызовы и гонки.
-- **App.tsx**: погашено предупреждение `react-hooks/exhaustive-deps` (mount-once эффект, прагма).
-- Итоговый прогон: `cargo test` 29/29, `cargo clippy` чистый, `pnpm test` 43/43, typecheck/lint/prettier PASS, `pnpm build` PASS.
+Personal state became inspectable and correctable instead of functioning as an opaque memory store.

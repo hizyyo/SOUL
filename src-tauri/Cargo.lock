@@ -3105,7 +3105,7 @@ dependencies = [
 
 [[package]]
 name = "soul"
-version = "0.1.0"
+version = "0.2.0-alpha.1"
 dependencies = [
  "argon2",
  "base64 0.22.1",

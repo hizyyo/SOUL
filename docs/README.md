@@ -12,6 +12,11 @@ This directory contains the product, operational, validation, and historical doc
 - [Production readiness](operations/production-readiness.md)
 - [External blockers](EXTERNAL_BLOCKERS.md)
 
+## Releases
+
+- [Changelog](../CHANGELOG.md)
+- [0.2.0-alpha.1 draft release notes](releases/0.2.0-alpha.1.md)
+
 ## Validation
 
 - [Validation playbook](validation/P0_VALIDATION_PLAYBOOK.md)
