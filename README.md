@@ -1,8 +1,15 @@
 <div align="center">
+  <img src="docs/assets/soul-mark.svg" alt="SOUL" width="128" height="128" />
   <h1>SOUL</h1>
-  <img src="src-tauri/icons/app-icon.png" alt="SOUL" width="112" height="112" />
   <p><strong>A local-first identity and policy runtime for AI tools.</strong></p>
   <p>SOUL keeps a portable, inspectable model of your preferences, decisions, goals, and boundaries on your device, then compiles only the context required for each task.</p>
+  <p>
+    <img src="https://img.shields.io/badge/Tauri_2-24C8DB?style=flat-square&logo=tauri&logoColor=white" alt="Tauri 2" />
+    <img src="https://img.shields.io/badge/Rust-000000?style=flat-square&logo=rust&logoColor=white" alt="Rust" />
+    <img src="https://img.shields.io/badge/React_19-20232A?style=flat-square&logo=react&logoColor=61DAFB" alt="React 19" />
+    <img src="https://img.shields.io/badge/TypeScript_6-3178C6?style=flat-square&logo=typescript&logoColor=white" alt="TypeScript 6" />
+    <img src="https://img.shields.io/badge/SQLite_+_SQLCipher-003B57?style=flat-square&logo=sqlite&logoColor=white" alt="SQLite and SQLCipher" />
+  </p>
   <p>
     <a href="#quick-start">Quick start</a> ·
     <a href="#architecture">Architecture</a> ·
@@ -26,6 +33,25 @@ SOUL provides a user-owned layer between a person and the AI clients they alread
 - **Inspectable provenance**: inferred information remains reviewable, correctable, and attributable to its source.
 - **Measurable personalization**: blind preference evaluations compare SOUL-assisted responses against a reviewed baseline.
 - **Deterministic policy checks**: explicit rules can allow, deny, or require confirmation before a mediated action proceeds.
+
+## Technology Stack
+
+| Layer            | Technologies                                       |
+| :--------------- | :------------------------------------------------- |
+| **Desktop**      | Tauri 2, Rust                                      |
+| **Interface**    | React 19, TypeScript 6, Vite 8                     |
+| **Local data**   | SQLite, SQLCipher, FTS5                            |
+| **Contracts**    | Zod, shared TypeScript schemas                     |
+| **Integrations** | MCP, Chromium Manifest V3, Native Messaging        |
+| **Quality**      | Vitest, Cargo test, Clippy, ESLint, GitHub Actions |
+| **Tooling**      | pnpm workspaces, Prettier, NSIS release checks     |
+
+<p align="center">
+  <img src="https://img.shields.io/badge/Vite_8-646CFF?style=for-the-badge&logo=vite&logoColor=white" alt="Vite 8" />
+  <img src="https://img.shields.io/badge/pnpm_11-F69220?style=for-the-badge&logo=pnpm&logoColor=white" alt="pnpm 11" />
+  <img src="https://img.shields.io/badge/Vitest_4-6E9F18?style=for-the-badge&logo=vitest&logoColor=white" alt="Vitest 4" />
+  <img src="https://img.shields.io/badge/GitHub_Actions-2088FF?style=for-the-badge&logo=githubactions&logoColor=white" alt="GitHub Actions" />
+</p>
 
 ## Product Principles
 
