@@ -180,7 +180,20 @@ if (-not $SkipPackaging) {
     $env:SOUL_TARGET_TRIPLE = $Target
     $env:SOUL_SKIP_SIDECAR_BUILD = '1'
     try {
-        Invoke-MsvcCommand "set SOUL_TARGET_TRIPLE=$Target && pnpm tauri build --target $Target --bundles nsis --ci --no-sign"
+        Invoke-MsvcCommand "set SOUL_TARGET_TRIPLE=$Target && pnpm tauri build --target $Target --no-bundle --ci --no-sign"
+
+        # Tauri's Cargo build compiles every binary target and replaces the
+        # sidecar outputs. Stage and verify those final binaries before bundling.
+        Copy-ReleaseSidecars
+        & node (Join-Path $PSScriptRoot 'verify-sidecars.mjs') `
+            --target $Target `
+            --prepared-dir $sidecarDir `
+            --source-dir $targetReleaseDir
+        if ($LASTEXITCODE -ne 0) {
+            throw "Final sidecar verification failed with exit code $LASTEXITCODE."
+        }
+
+        Invoke-MsvcCommand "set SOUL_TARGET_TRIPLE=$Target && pnpm tauri bundle --target $Target --bundles nsis --ci --no-sign"
     } finally {
         Remove-Item Env:SOUL_TARGET_TRIPLE -ErrorAction SilentlyContinue
         Remove-Item Env:SOUL_SKIP_SIDECAR_BUILD -ErrorAction SilentlyContinue
